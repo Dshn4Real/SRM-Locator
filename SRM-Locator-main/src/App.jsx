@@ -2035,7 +2035,24 @@ const App = () => {
     return () => controls.stop();
   }, [panelTarget, panelY, reduceMotion]);
   // Whose options sheet is open: an id, so it follows their live updates and closes if they go.
-  const optionsMember = optionsMemberId ? users.find((u) => u.id === optionsMemberId) ?? null : null;
+  const optionsMember = optionsMemberId
+    ? users.find((u) => u.id === optionsMemberId) ??
+      (() => {
+        const ghost = ghostMembers.find((g) => g.id === optionsMemberId);
+        if (!ghost) return null;
+        return {
+          id: ghost.id,
+          name: ghost.name,
+          lat: ghost.position?.lat,
+          lng: ghost.position?.lng,
+          battery: ghost.battery,
+          status: 'GHOST',
+          hasFix: true,
+          phase: ghost.phase,
+          elapsedLabel: ghost.elapsedLabel,
+        };
+      })()
+    : null;
   // The group panel's search box: at the head of the buildings list, and above the members.
   const groupSearch = (
     <label className="relative block">
@@ -2537,7 +2554,10 @@ const App = () => {
                     exit={{ opacity: 0 }}
                     key={`ghost-row-${ghost.id}`}
                     data-testid="lost-member-row"
-                    onClick={() => handleFocus(ghost.position, null)}
+                    onClick={() => {
+                      handleFocus(ghost.position, null);
+                      setOptionsMemberId(ghost.id);
+                    }}
                     className="flex items-center gap-3 p-3 rounded-2xl glass-panel font-ui text-text cursor-pointer hover:bg-surface/90 transition-all duration-150"
                   >
                     <Avatar name={ghost.name || '?'} dashed className="opacity-70" />
@@ -2712,6 +2732,7 @@ const App = () => {
               walkingRoute={shownRoute}
               canClearWaypoint={canClearWaypoint}
               highlightBuildingId={(activeTab === 'buildings' && selectedItem?.id) || routeEnd?.id || null}
+              onSelectMember={setOptionsMemberId}
               onClearWaypoint={() => socket.emit('clear-waypoint', squadCode)}
               onArTrack={setArTarget}
               isSatellite={isSatellite}
@@ -2811,7 +2832,10 @@ const App = () => {
               key={u.id}
               lat={u.lat}
               lng={u.lng}
-              onClick={() => handleFocus({ lat: u.lat, lng: u.lng }, null)}
+              onClick={() => {
+                handleFocus({ lat: u.lat, lng: u.lng }, null);
+                setOptionsMemberId(u.id);
+              }}
               style={{
                 cursor: 'pointer',
                 animation: 'locus-member-fade-in 0.6s ease',
@@ -2838,7 +2862,10 @@ const App = () => {
               key={`ghost-${ghost.id}`}
               lat={ghost.position.lat}
               lng={ghost.position.lng}
-              onClick={() => handleFocus(ghost.position, ghostFocusItem(ghost))}
+              onClick={() => {
+                handleFocus(ghost.position, ghostFocusItem(ghost));
+                setOptionsMemberId(ghost.id);
+              }}
               style={{ cursor: 'pointer', opacity: ghost.fading ? 0 : 1, transition: `opacity ${GHOST_FADE_MS}ms ease` }}
             >
               <GhostMemberMarker name={ghost.name} phase={ghost.phase} elapsedLabel={ghost.elapsedLabel} />
@@ -3069,6 +3096,11 @@ const App = () => {
         headingLive={hasHeadingReading}
         isLead={squadRole === 'OWNER'}
         onClose={() => setOptionsMemberId(null)}
+        onNavigate={(m) => {
+          handleWaypointSelect({ lat: m.lat, lng: m.lng, name: m.name, id: m.id });
+          handleFocus({ lat: m.lat, lng: m.lng }, null);
+          if (isMobile) setMobileView('grid');
+        }}
         onPing={sendPing}
         onShowOnMap={(m) => {
           handleFocus({ lat: m.lat, lng: m.lng }, null);
