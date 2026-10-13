@@ -2832,12 +2832,15 @@ const App = () => {
               key={u.id}
               lat={u.lat}
               lng={u.lng}
-              onClick={() => {
+              onClick={(e) => {
+                e?.stopPropagation?.();
                 handleFocus({ lat: u.lat, lng: u.lng }, null);
                 setOptionsMemberId(u.id);
               }}
               style={{
                 cursor: 'pointer',
+                pointerEvents: 'auto',
+                zIndex: 45,
                 animation: 'locus-member-fade-in 0.6s ease',
                 // Stage 7: on another floor of the building you're viewing - dimmed, never hidden.
                 ...(SHOW_INDOOR_POSITION_TO_SQUAD && isOnOtherFloor(u, indoorView) ? { opacity: 0.35 } : {}),
@@ -2862,11 +2865,18 @@ const App = () => {
               key={`ghost-${ghost.id}`}
               lat={ghost.position.lat}
               lng={ghost.position.lng}
-              onClick={() => {
+              onClick={(e) => {
+                e?.stopPropagation?.();
                 handleFocus(ghost.position, ghostFocusItem(ghost));
                 setOptionsMemberId(ghost.id);
               }}
-              style={{ cursor: 'pointer', opacity: ghost.fading ? 0 : 1, transition: `opacity ${GHOST_FADE_MS}ms ease` }}
+              style={{
+                cursor: 'pointer',
+                pointerEvents: 'auto',
+                zIndex: 44,
+                opacity: ghost.fading ? 0 : 1,
+                transition: `opacity ${GHOST_FADE_MS}ms ease`
+              }}
             >
               <GhostMemberMarker name={ghost.name} phase={ghost.phase} elapsedLabel={ghost.elapsedLabel} />
             </div>

@@ -42,18 +42,37 @@ export default function MemberOptions({ member, me, heading, headingLive, isLead
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-2">
                 <p className="text-heading truncate font-semibold text-white">{name}</p>
-                {shown?.status === 'GHOST' && (
+                {shown?.status === 'GHOST' ? (
                   <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/30">
                     Signal lost
+                  </span>
+                ) : (
+                  <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                    {status?.text || 'Active'}
                   </span>
                 )}
               </div>
               <p className="text-secondary text-gray-400 mt-0.5">{facts || 'Location tracking active'}</p>
-              {extras && (
-                <p className={`text-secondary mt-0.5 ${shown?.battery > 0 && shown.battery < 25 ? 'text-amber-400 font-medium' : 'text-gray-400'}`}>
-                  {extras}
-                </p>
-              )}
+            </div>
+          </div>
+
+          {/* Quick telemetry stat chips */}
+          <div className="grid grid-cols-3 gap-2 py-3 border-b border-[#30363d]">
+            <div className="flex flex-col items-center justify-center p-2 rounded-xl bg-[#0d1117] border border-[#30363d]/60 text-center">
+              <span className="text-[10px] text-gray-400 font-medium uppercase tracking-wider">Distance</span>
+              <span className="text-xs font-bold text-white mt-0.5">{place?.distance || '—'}</span>
+            </div>
+            <div className="flex flex-col items-center justify-center p-2 rounded-xl bg-[#0d1117] border border-[#30363d]/60 text-center">
+              <span className="text-[10px] text-gray-400 font-medium uppercase tracking-wider">Battery</span>
+              <span className={`text-xs font-bold mt-0.5 ${shown?.battery > 0 && shown.battery < 25 ? 'text-amber-400' : 'text-white'}`}>
+                {Number.isFinite(shown?.battery) && shown.battery > 0 ? `${shown.battery}%` : '—'}
+              </span>
+            </div>
+            <div className="flex flex-col items-center justify-center p-2 rounded-xl bg-[#0d1117] border border-[#30363d]/60 text-center">
+              <span className="text-[10px] text-gray-400 font-medium uppercase tracking-wider">Speed</span>
+              <span className="text-xs font-bold text-white mt-0.5">
+                {shown?.speed > 0 ? `${Math.round(shown.speed)} km/h` : '0 km/h'}
+              </span>
             </div>
           </div>
 
