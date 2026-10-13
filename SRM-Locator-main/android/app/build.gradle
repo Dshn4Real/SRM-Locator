@@ -1,0 +1,113 @@
+apply plugin: 'com.android.application'
+
+// Load local.properties by hand (Capacitor's Groovy build scripts don't expose the
+// project's `localProperties` object the way a stock Android Studio project would) so
+// MAPS_API_KEY never has to be hardcoded/committed anywhere in this file or the manifest.
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file('local.properties')
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withInputStream { localProperties.load(it) }
+}
+
+android {
+    namespace = "com.locus.app"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "com.locus.app"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        // Bumped by scripts/release.mjs - do not hand-edit. versionName must stay valid
+        // semver: the in-app updater compares it against the GitHub release tag.
+        versionCode 3
+        versionName "1.1.21"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        // Empty string (not null) so a missing key fails obviously inside Google Maps
+        // (invalid key error) instead of Gradle throwing over an unresolved placeholder.
+        manifestPlaceholders = [MAPS_API_KEY: localProperties.getProperty('MAPS_API_KEY', '')]
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    // Release signing for the self-updater. Android refuses an update whose signature
+    // differs from the installed app, so every release APK must be signed with the SAME
+    // key - see UPDATER.md for generating it. Credentials live in android/local.properties
+    // (gitignored); when they are absent the block is simply skipped and Gradle emits an
+    // unsigned APK, which scripts/release.mjs detects and refuses to publish rather than
+    // silently shipping something nobody can install over.
+    def hasReleaseSigning = localProperties.getProperty('LOCUS_KEYSTORE_FILE') != null
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile rootProject.file(localProperties.getProperty('LOCUS_KEYSTORE_FILE'))
+                storePassword localProperties.getProperty('LOCUS_KEYSTORE_PASSWORD')
+                keyAlias localProperties.getProperty('LOCUS_KEY_ALIAS')
+                keyPassword localProperties.getProperty('LOCUS_KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        // The side-by-side test build (npm run sidetest:install): the real app as a separate
+        // app, "LOCUS Test" (src/sidetest/res), installed next to LOCUS rather than over it.
+        // Debug-signed, so it can never update or replace the release app. Its web build
+        // (Vite mode 'sidetest') has both updaters switched off (src/utils/buildMode.js).
+        // defaultConfig and release above are untouched by it.
+        sidetest {
+            initWith debug
+            applicationIdSuffix ".sidetest"
+            matchingFallbacks = ['debug']
+        }
+    }
+}
+
+// A release APK takes only a production web build: never the test build's JavaScript
+// (mode 'sidetest') or a device check, even from a hand-run `gradlew assembleRelease`.
+// Every Vite build writes its mode to locus-build.json (vite.config.js); cap sync copies it
+// here. scripts/release.mjs checks the same, and that the build is its own.
+def webBuildMarker = file('src/main/assets/public/locus-build.json')
+tasks.matching { it.name == 'preReleaseBuild' }.configureEach {
+    doFirst {
+        def mode = webBuildMarker.exists() ? new groovy.json.JsonSlurper().parse(webBuildMarker).mode : null
+        if (mode != 'production') {
+            throw new GradleException("Release refused: the web assets are a '${mode ?: 'unknown'}' build, not production. Run `npm run build` and `npx cap sync android` first.")
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

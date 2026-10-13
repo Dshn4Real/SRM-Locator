@@ -1,0 +1,239 @@
+import { describe, it, expect } from 'vitest';
+import {
+  arRoutePathFor,
+  remainingPath,
+  resamplePath,
+  buildRoadRibbon,
+  ROAD_LINE_MAX_DISTANCE_METERS,
+  ROAD_LINE_NEAR_WIDTH_PX,
+  ROAD_LINE_FAR_WIDTH_PX,
+  ROAD_LINE_BOTTOM,
+  roadScreenYFor,
+} from '../src/utils/arRoadLine.js';
+import { haversineMeters } from '../src/utils/walkingRoute.js';
+import { projectScreenY } from '../src/utils/arTags.js';
+import { cameraQuaternion, projectGroundPoint } from '../src/utils/arCamera.js';
+import { LandmarkAnchorEngine } from '../src/utils/landmarkAnchorEngine.js';
+
+const START = { lat: 12.8230, lng: 80.0440 };
+// A point `north` m north and `east` m east of START.
+const pt = (north, east = 0) => ({
+  lat: START.lat + north / 111320,
+  lng: START.lng + east / (111320 * Math.cos((START.lat * Math.PI) / 180)),
+});
+const W = 400;
+const H = 800;
+const ribbon = (path, where, heading = 0) => buildRoadRibbon({ origin: where, heading, path, screenWidth: W, screenHeight: H });
+const alongEnd = (r) => r.points[r.points.length - 1].along;
+
+// Your own destination's route when you have one, otherwise the meeting point's (owner's rule,
+// AR Scan batch); drawn only when AR Scan is aimed at where that route leads.
+describe('arRoutePathFor', () => {
+  const waypoint = { lat: 1, lng: 2, name: 'RALLY' };
+  const route = { path: [pt(0), pt(100)], isRealRoute: true };
+  const mine = { lat: 5, lng: 6, name: 'TECH PARK' };
+  const myRoute = { path: [pt(0), pt(50), pt(200)], isRealRoute: true };
+  const both = { personalTarget: mine, personalRoute: myRoute, activeWaypoint: waypoint, walkingRoute: route };
+
+  it('with your own destination: its route, when AR Scan is aimed at it', () => {
+    expect(arRoutePathFor({ ...mine }, both)).toBe(myRoute.path);
+  });
+
+  it('with your own destination, AR Scan on the meeting point: no road (it would lead elsewhere)', () => {
+    expect(arRoutePathFor({ ...waypoint }, both)).toBeNull();
+  });
+
+  it('with no destination of your own: the meeting point\'s route, when AR Scan is on it', () => {
+    expect(arRoutePathFor({ lat: 1, lng: 2, name: 'RALLY' }, { activeWaypoint: waypoint, walkingRoute: route })).toBe(route.path);
+  });
+
+  it('gives nothing for a group member, even one standing on the destination', () => {
+    expect(arRoutePathFor({ lat: 1, lng: 2, name: 'B', memberUid: 'u-b' }, { activeWaypoint: waypoint, walkingRoute: route })).toBeNull();
+    expect(arRoutePathFor({ lat: 5, lng: 6, name: 'B', memberId: 's-b' }, both)).toBeNull();
+  });
+
+  it('gives nothing for any other target, or with nowhere to go', () => {
+    expect(arRoutePathFor({ lat: 3, lng: 4, name: 'SRM_HQ' }, both)).toBeNull();
+    expect(arRoutePathFor({ lat: 1, lng: 2 }, { walkingRoute: route })).toBeNull();
+    expect(arRoutePathFor({ lat: 1, lng: 2 })).toBeNull();
+    expect(arRoutePathFor(null, both)).toBeNull();
+  });
+
+  it('gives nothing until a real route exists, to either', () => {
+    expect(arRoutePathFor(waypoint, { activeWaypoint: waypoint, walkingRoute: { ...route, isRealRoute: false } })).toBeNull();
+    expect(arRoutePathFor(waypoint, { activeWaypoint: waypoint, walkingRoute: null })).toBeNull();
+    expect(arRoutePathFor(waypoint, { activeWaypoint: waypoint, walkingRoute: { path: [pt(0)], isRealRoute: true } })).toBeNull();
+    expect(arRoutePathFor({ ...mine }, { ...both, personalRoute: { ...myRoute, isRealRoute: false } })).toBeNull();
+    expect(arRoutePathFor({ ...mine }, { ...both, personalRoute: null })).toBeNull();
+  });
+});
+
+describe('remainingPath', () => {
+  const path = [pt(0), pt(100), pt(200), pt(300)];
+
+  it('drops what has been walked, snapping onto the segment you are on', () => {
+    const rest = remainingPath(path, pt(160, 4)); // a little off the route, mid-segment
+    expect(rest).toHaveLength(3);
+    expect(haversineMeters(rest[0], pt(160))).toBeLessThan(0.5);
+    expect(rest.slice(1)).toEqual([path[2], path[3]]);
+  });
+
+  it('starts from the first vertex before you set off, and ends at the destination', () => {
+    expect(remainingPath(path, pt(-10))[0]).toEqual(path[0]);
+    const atEnd = remainingPath(path, pt(310));
+    expect(haversineMeters(atEnd[0], path[3])).toBeLessThan(0.01);
+  });
+
+  it('is empty for anything unusable', () => {
+    expect(remainingPath(null, START)).toEqual([]);
+    expect(remainingPath([pt(0)], START)).toEqual([]);
+    expect(remainingPath(path, null)).toEqual([]);
+    expect(remainingPath([pt(0), { lat: NaN, lng: 1 }], START)).toEqual([]);
+  });
+});
+
+describe('resamplePath', () => {
+  it('samples every step and stops exactly at the limit', () => {
+    const s = resamplePath([pt(0), pt(400)], 150, 5);
+    expect(s[0].along).toBe(0);
+    expect(s[s.length - 1].along).toBe(150);
+    expect(haversineMeters(s[s.length - 1], pt(150))).toBeLessThan(0.5);
+    expect(s.length).toBe(31);
+  });
+
+  it('keeps the route’s corners and stops at its end', () => {
+    const s = resamplePath([pt(0), pt(12), pt(12, 12)], 150, 5);
+    expect(s.some((p) => haversineMeters(p, pt(12)) < 0.01)).toBe(true);
+    expect(haversineMeters(s[s.length - 1], pt(12, 12))).toBeLessThan(0.01);
+    expect(s[s.length - 1].along).toBeCloseTo(24, 0);
+  });
+});
+
+describe('buildRoadRibbon', () => {
+  it('gets shorter as you walk the route, never drawing what is behind you', () => {
+    const path = [pt(0), pt(100), pt(200)]; // straight north, 200 m
+    let prevEnd = Infinity;
+    for (const walked of [0, 60, 120, 170, 190]) {
+      const r = ribbon(path, pt(walked));
+      const drawn = alongEnd(r);
+      expect(drawn).toBeCloseTo(Math.min(200 - walked, ROAD_LINE_MAX_DISTANCE_METERS), 0);
+      expect(drawn).toBeLessThanOrEqual(prevEnd);
+      prevEnd = drawn;
+      // Every point is ahead: nothing from the part already walked.
+      for (const p of r.points) expect(p.y).toBeLessThan(H);
+      expect(r.points.every((p) => p.distance >= 0)).toBe(true);
+    }
+  });
+
+  it('draws no further than ROAD_LINE_MAX_DISTANCE_METERS along a long route', () => {
+    const r = ribbon([pt(0), pt(1000)], pt(0));
+    expect(alongEnd(r)).toBe(ROAD_LINE_MAX_DISTANCE_METERS);
+    expect(Math.max(...r.points.map((p) => p.distance))).toBeLessThanOrEqual(ROAD_LINE_MAX_DISTANCE_METERS);
+  });
+
+  it('stops at the first point out of view instead of drawing through it', () => {
+    // North 40 m, east 30 m (out of a 60 deg cone), then north again, back in view.
+    const path = [pt(0), pt(40), pt(40, 30), pt(200, 30)];
+    const r = ribbon(path, pt(0));
+    // Out of view once more than 30 deg east of north: about 23 m into the east leg.
+    expect(alongEnd(r)).toBeGreaterThan(40);
+    expect(alongEnd(r)).toBeLessThan(40 + 23.2);
+    for (const p of r.points) {
+      expect(p.x).toBeGreaterThan(0);
+      expect(p.x).toBeLessThan(W);
+    }
+  });
+
+  it('starts at your feet even when GPS puts you a few metres off the route', () => {
+    const r = ribbon([pt(0), pt(200)], pt(20, 10)); // 10 m east of it, facing north
+    expect(r).not.toBeNull();
+    // The route runs 10 m to your left, so it enters a 60 deg view ~17 m ahead, at the left edge.
+    expect(r.points[0].distance).toBeLessThan(25);
+    expect(r.points[0].x).toBeLessThan(W / 4);
+  });
+
+  it('draws nothing when the route is well off to the side, or behind you', () => {
+    expect(ribbon([pt(0), pt(200)], pt(20, 40))).toBeNull(); // 40 m off: first in view ~69 m along
+    expect(ribbon([pt(0), pt(40), pt(40, -200)], pt(0), 180)).toBeNull(); // behind, then off west
+    expect(ribbon([pt(0), pt(200)], pt(0), 180)).toBeNull(); // facing away
+  });
+
+  it('tapers with distance, and sits lower on screen when nearer', () => {
+    const r = ribbon([pt(0), pt(300)], pt(0));
+    const [first, last] = [r.points[0], r.points[r.points.length - 1]];
+    expect(first.width).toBeGreaterThan(ROAD_LINE_NEAR_WIDTH_PX - 5);
+    expect(last.width).toBeCloseTo(ROAD_LINE_FAR_WIDTH_PX, 5);
+    for (let k = 1; k < r.points.length; k++) {
+      expect(r.points[k].width).toBeLessThanOrEqual(r.points[k - 1].width);
+      expect(r.points[k].y).toBeLessThanOrEqual(r.points[k - 1].y);
+    }
+    // Straight ahead, so the edges sit half a width either side of the centre.
+    r.points.forEach((p, k) => {
+      expect(r.right[k].x - r.left[k].x).toBeCloseTo(p.width, 6);
+    });
+    // From low on the screen at your feet up to where a tag that far away sits.
+    expect(first.y).toBeCloseTo(roadScreenYFor(5) * H, 6); // first sample, 5 m ahead
+    expect(first.y).toBeLessThan(ROAD_LINE_BOTTOM * H);
+    expect(last.y).toBeCloseTo(projectScreenY(ROAD_LINE_MAX_DISTANCE_METERS, H), 6);
+    for (let k = 1; k < r.points.length; k++) expect(r.points[k].y).toBeLessThan(r.points[k - 1].y);
+    expect(r.nearY).toBe(first.y);
+    expect(r.farY).toBe(last.y);
+  });
+
+  it('draws nothing, and does not throw, for a missing or too-short route', () => {
+    for (const path of [null, undefined, [], [pt(0)], [pt(0), pt(0)]]) {
+      expect(ribbon(path, pt(0))).toBeNull();
+    }
+    expect(buildRoadRibbon({ origin: null, heading: 0, path: [pt(0), pt(50)], screenWidth: W, screenHeight: H })).toBeNull();
+    expect(ribbon([pt(0), pt(50)], pt(0), NaN)).toBeNull();
+  });
+});
+
+describe('road line and destination tag, through one camera', () => {
+  const q = cameraQuaternion({ heading: 0, tilt: null });
+  const FOV = 50;
+  const projectGround = (lat, lng) => {
+    const at = projectGroundPoint({ q, width: W, height: H, origin: pt(0), lat, lng, horizontalFovDeg: FOV });
+    return at && { x: at.x * W, y: at.y * H };
+  };
+
+  it('places each ribbon sample where the camera puts it on the ground', () => {
+    const rib = buildRoadRibbon({ origin: pt(0), heading: 0, path: [pt(-10), pt(300)], screenWidth: W, screenHeight: H, projectGround });
+    expect(rib.points.length).toBeGreaterThan(2);
+    // (pt() converts metres to degrees flat; within half a pixel of the route's own samples.)
+    for (const p of rib.points) {
+      const at = projectGround(pt(p.along).lat, pt(p.along).lng);
+      expect(p.x).toBeCloseTo(at.x, 0);
+      expect(p.y).toBeCloseTo(at.y, 0);
+    }
+  });
+
+  it('meets the destination tag (anchored on the ground) at the road’s far end', () => {
+    for (const d of [20, 60, 140]) {
+      const rib = buildRoadRibbon({ origin: pt(0), heading: 0, path: [pt(-10), pt(d)], screenWidth: W, screenHeight: H, projectGround });
+      const end = rib.points[rib.points.length - 1];
+      const engine = new LandmarkAnchorEngine();
+      engine.setPosition(pt(0));
+      engine.setLandmarks([{ id: 'target', kind: 'target', name: 'RALLY', ...pt(d), heightM: 0 }]);
+      const [tag] = engine.frame({ q, hFovDeg: FOV, width: W, height: H, targetId: 'target' }).tags;
+      expect(tag.screenX).toBeCloseTo(end.x, 6);
+      expect(tag.screenY).toBeCloseTo(end.y, 6);
+    }
+  });
+
+  it('follows the exact distance, so the steep near end does not step as you walk', () => {
+    // 3 m beside the route: each sample is sqrt(along^2 + 9) m away, not a whole number.
+    const r = ribbon([pt(-10), pt(300)], pt(0, 3));
+    for (const p of r.points.slice(0, 4)) {
+      expect(p.y).toBeCloseTo(roadScreenYFor(Math.hypot(p.along, 3)) * H, 0);
+    }
+  });
+
+  it('is a perspective curve: from just above the panel toward the horizon, meeting a 150 m tag', () => {
+    expect(roadScreenYFor(0)).toBe(ROAD_LINE_BOTTOM);
+    expect(roadScreenYFor(ROAD_LINE_MAX_DISTANCE_METERS)).toBeCloseTo(projectScreenY(ROAD_LINE_MAX_DISTANCE_METERS, 1), 9);
+    // Near metres spread out, far ones bunch up.
+    const drop = (a, b) => roadScreenYFor(a) - roadScreenYFor(b);
+    expect(drop(0, 15)).toBeGreaterThan(5 * drop(75, 150));
+  });
+});
