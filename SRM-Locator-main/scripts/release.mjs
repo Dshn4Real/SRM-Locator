@@ -56,13 +56,17 @@ const capture = (command, args) => {
 const argv = process.argv.slice(2);
 const flags = new Set(argv.filter((a) => a.startsWith('--')));
 const positional = argv.filter((a) => !a.startsWith('--'));
-const notesIndex = argv.indexOf('--notes');
-const notesFile = notesIndex !== -1 ? argv[notesIndex + 1] : null;
-const version = positional.find((a) => !a.startsWith('-') && a !== notesFile);
+const flagValue = (name) => {
+  const i = argv.indexOf(name);
+  return i === -1 ? null : argv[i + 1];
+};
+const notesFile = flagValue('--notes');
+const repoArg = flagValue('--repo') || process.env.LOCUS_RELEASE_REPO || 'vithyakrish1402-web/Locus';
+const version = positional.find((a) => !a.startsWith('-') && a !== notesFile && a !== flagValue('--repo'));
 const mandatory = flags.has('--mandatory');
 const dryRun = flags.has('--dry-run');
 
-if (!version) die('usage: npm run release -- <version> [--mandatory] [--notes <file>] [--dry-run]');
+if (!version) die('usage: npm run release -- <version> [--mandatory] [--notes <file>] [--repo <owner/repo>] [--dry-run]');
 if (!/^\d+\.\d+\.\d+$/.test(version)) {
   // The client parses the tag with a semver regex and fails closed on anything else,
   // so a malformed tag here means a release nobody is ever offered.
@@ -124,8 +128,11 @@ if (existingTag.stdout) die(`tag v${version} already exists`);
 // Every release tag on GitHub, in both series. Releases are made with `gh release create`,
 // which tags on GitHub only, so the local clone's tags can't be trusted to be complete.
 const publishedTags = () => {
-  const listed = capture('gh', ['release', 'list', '--limit', '500', '--json', 'tagName', '--jq', '.[].tagName']);
-  if (listed.status !== 0) die('could not list the published releases (gh release list)');
+  const args = ['release', 'list', '--limit', '500'];
+  if (repoArg) args.push('--repo', repoArg);
+  args.push('--json', 'tagName', '--jq', '.[].tagName');
+  const listed = capture('gh', args);
+  if (listed.status !== 0) die(`could not list the published releases (gh release list --repo ${repoArg})`);
   return listed.stdout.split(/\r?\n/).filter(Boolean);
 };
 // Above every JS bundle too: see releaseVersionConflict.
@@ -237,7 +244,7 @@ if (gradleChanged) {
 }
 run('git', ['push']);
 
-run('gh', [
+const releaseArgs = [
   'release',
   'create',
   `v${version}`,
@@ -246,7 +253,10 @@ run('gh', [
   `LOCUS v${version}`,
   '--notes-file',
   bodyFile,
-]);
+];
+if (repoArg) releaseArgs.push('--repo', repoArg);
+
+run('gh', releaseArgs);
 
 if (isBaseline) {
   console.log(`\n  Published the v${version} baseline.`);
