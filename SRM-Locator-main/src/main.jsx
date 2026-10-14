@@ -18,8 +18,12 @@ if (import.meta.env.MODE === 'device-check') {
   import('./devtools/wifiDeviceCheck.js').then((check) => check.installWifiDeviceCheck())
 }
 
+import { ErrorBoundary } from './ErrorBoundary.jsx'
+
 createRoot(document.getElementById('root')).render(
   <StrictMode>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </StrictMode>,
 )

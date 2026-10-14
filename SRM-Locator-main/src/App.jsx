@@ -32,6 +32,13 @@ import { SharingChip, TopBar } from './components/map/TopBar';
 import { MapControls, MeetingPointButton } from './components/map/MapControls';
 import { BELOW_TOP_BAR } from './utils/mapChrome';
 import RouteCard from './components/map/RouteCard';
+import {
+  TurnInstructionCard,
+  NavigationSummaryCard,
+  RecenterButton,
+  ArrivalPanel,
+} from './components/navigation/NavigationHUD';
+import { useNavigationController } from './hooks/useNavigationController';
 import BuildingRow from './components/map/BuildingRow';
 import GroupHeader from './components/group/GroupHeader';
 import SharingControl from './components/group/SharingControl';
@@ -71,6 +78,7 @@ import { useLiveHeading } from './hooks/useLiveHeading';
 import { useGhostProjectionLines } from './hooks/useGhostProjectionLines';
 import { useWaypointNavigationLine } from './hooks/useWaypointNavigationLine';
 import { useWalkingRoute } from './hooks/useWalkingRoute';
+import { formatDistanceMeters, formatDurationMinutes } from './utils/walkingRoute';
 import LiveLocationMarker, { NAVIGATING_SPEED_MPS } from './LiveLocationMarker';
 import GhostMemberMarker from './GhostMemberMarker';
 import WaypointMarker from './components/WaypointMarker';
@@ -538,6 +546,9 @@ const App = () => {
   const [routeStart, setRouteStart] = useState(null);
   const [routeEnd, setRouteEnd] = useState(null);
   const [routeData, setRouteData] = useState(null);
+  // Full Google Maps-style turn-by-turn navigation session
+  const [isNavigatingMode, setIsNavigatingMode] = useState(false);
+  const leafletMapRef = useRef(null);
 
   // --- MODIFIED: FIREBASE AUTH STATE ---
   const [user, setUser] = useState(null);
@@ -635,6 +646,7 @@ const App = () => {
     setArTarget(prev => followArTarget(prev, users));
   }, [users]);
   const [liveLocation, setLiveLocation] = useState(null);
+  const [liveAccuracy, setLiveAccuracy] = useState(null);
   // Raw m/s from geolocation's coords.speed, tracked separately from the km/h value
   // broadcast over the wire — drives this device's own LiveLocationMarker isNavigating state.
   const [liveSpeed, setLiveSpeed] = useState(0);
@@ -1408,10 +1420,11 @@ const App = () => {
     // ---  FORCE INITIAL GPS LOCK ---
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        const { latitude, longitude } = position.coords;
+        const { latitude, longitude, accuracy } = position.coords;
         const smoothed = localPrecognition.current.filter(latitude, longitude);
         setLiveLocation({ lat: smoothed.lat, lng: smoothed.lng });
         liveLocationRef.current = { lat: smoothed.lat, lng: smoothed.lng };
+        setLiveAccuracy(accuracy || null);
         setLocationError(null);
         noteRealFix();
 
@@ -1477,12 +1490,13 @@ const App = () => {
     // ---  LIVE GPS TRACKING ---
     const watchId = navigator.geolocation.watchPosition(
       async (position) => {
-        const { latitude, longitude, speed } = position.coords;
+        const { latitude, longitude, speed, accuracy } = position.coords;
         const smoothed = localPrecognition.current.filter(latitude, longitude);
 
         setLiveLocation({ lat: smoothed.lat, lng: smoothed.lng });
         liveLocationRef.current = { lat: smoothed.lat, lng: smoothed.lng };
         setLiveSpeed(speed || 0);
+        setLiveAccuracy(accuracy || null);
         setLocationError(null);
         noteRealFix();
 
@@ -1493,9 +1507,9 @@ const App = () => {
             batteryLevel = Math.round(battery.level * 100);
           }
         } catch {
-        // getBattery() is unsupported in Firefox/Safari and can reject (permission,
-        // insecure context) even in Chrome — fall back to the 100 default silently.
-      }
+          // getBattery() is unsupported in Firefox/Safari and can reject (permission,
+          // insecure context) even in Chrome — fall back to the 100 default silently.
+        }
 
         if (telemetryModeRef.current === 'FROZEN') return;
 
@@ -1721,7 +1735,7 @@ const App = () => {
   activeWaypointRef.current = activeWaypoint;
   const selfIdRef = useRef(null);
   selfIdRef.current = user?.uid || socket.id;
-  const focusRallyPointRef = useRef(() => {});
+  const focusRallyPointRef = useRef(() => { });
 
   // Glides the map to a point; if no map engine has registered yet, jumps instead. Either way
   // mapProps ends up at the target, so the controlled `center`/`zoom` stay in step.
@@ -1814,21 +1828,29 @@ const App = () => {
   };
 
   const handleWaypointSelect = (targetCoords) => {
-    if (!routeStart) {
-      if (liveLocation) {
-        setRouteStart({ name: "MY_LOCATION", ...liveLocation });
-        setRouteEnd(targetCoords);
-        calculateActualRoute({ name: "MY_LOCATION", ...liveLocation }, targetCoords);
-      } else {
-        setRouteStart(targetCoords);
-      }
-      setSelectedItem(null);
-    } else if (!routeEnd && targetCoords.id !== routeStart.id) {
-      setRouteEnd(targetCoords);
-      setSelectedItem(null);
-      calculateActualRoute(routeStart, targetCoords);
+    if (!targetCoords) return;
+    if (!locationReady) {
+      turnOnLocation();
+    }
+    const origin = liveLocation || SRM_KTR_COORDS;
+    setRouteStart({ name: "MY_LOCATION", ...origin });
+    setRouteEnd(targetCoords);
+    calculateActualRoute({ name: "MY_LOCATION", ...origin }, targetCoords);
+    setSelectedItem(null);
+    setIsNavigatingMode(true);
+    setMobileView('grid');
+    navigationController.handleRecenter();
+    if (leafletMapRef.current) {
+      leafletMapRef.current.flyTo([origin.lat, origin.lng], 19, { duration: 1.0 });
     }
   };
+
+  // Keep routeStart synchronized when live GPS location updates
+  useEffect(() => {
+    if (liveLocation && routeStart?.name === 'MY_LOCATION') {
+      setRouteStart((prev) => (prev ? { ...prev, lat: liveLocation.lat, lng: liveLocation.lng } : null));
+    }
+  }, [liveLocation?.lat, liveLocation?.lng]);
 
   // --- WAYPOINT DISTANCE ENGINE ---
   // Deliberately draws no line/route on the map — the destination building is
@@ -1873,6 +1895,7 @@ const App = () => {
     setRouteStart(null);
     setRouteEnd(null);
     setRouteData(null);
+    setIsNavigatingMode(false);
   };
 
   // The route card's "End route" ends your own route and nothing else. It used to clear the
@@ -1911,6 +1934,18 @@ const App = () => {
     compassHeading: heading,
   });
 
+  // Dedicated Turn-by-Turn Pedestrian Navigation Controller
+  const activeNavTarget = isNavigatingMode ? (personalTarget || activeWaypoint) : null;
+  const navigationController = useNavigationController({
+    isNavigating: Boolean(activeNavTarget),
+    destination: activeNavTarget,
+    liveLocation,
+    liveHeading,
+    speedMps: liveSpeed,
+    mapEngine: mapEngineFailed ? 'leaflet' : 'google',
+    mapInstance: mapEngineFailed ? leafletMapRef.current : mapRef.current,
+  });
+
   // Native Google Maps polylines for each dark member's projection vector —
   // no-ops when the Leaflet fallback is active (mapRef only holds a Google
   // map instance) or before the map's finished mounting. TacticalLeafletMap
@@ -1935,7 +1970,11 @@ const App = () => {
     liveLocation,
     activeWaypoint: personalTarget,
   });
-  const shownRoute = personalTarget ? personalRoute : walkingRoute;
+  const shownRoute = (isNavigatingMode && navigationController.activeRoute)
+    ? navigationController.activeRoute
+    : personalTarget
+      ? personalRoute
+      : walkingRoute;
 
   // Live navigation line from the operative's own position to the active
   // squad waypoint — same "no-op on Leaflet/before mount" gating as above.
@@ -1965,7 +2004,16 @@ const App = () => {
   const isTrackingSquadWaypoint = Boolean(
     routeEnd && activeWaypoint && routeEnd.lat === activeWaypoint.lat && routeEnd.lng === activeWaypoint.lng
   );
-  const displayedRouteData = (personalTarget && personalRoute) || (isTrackingSquadWaypoint && walkingRoute) || routeData;
+
+  const displayedRouteData =
+    (isNavigatingMode && navigationController.activeRoute)
+      ? {
+        distance: { text: formatDistanceMeters(navigationController.remainingDistanceMeters) },
+        duration: { text: formatDurationMinutes(navigationController.remainingTimeMinutes) },
+        isRealRoute: navigationController.activeRoute.isRealRoute,
+        steps: navigationController.activeRoute.steps,
+      }
+      : (personalTarget && personalRoute) || (isTrackingSquadWaypoint && walkingRoute) || routeData;
 
   // --- TACTICAL MAP RENDERING ENGINE ---
   // Memoised on exactly the inputs that can change the map's configuration.
@@ -2037,21 +2085,21 @@ const App = () => {
   // Whose options sheet is open: an id, so it follows their live updates and closes if they go.
   const optionsMember = optionsMemberId
     ? users.find((u) => u.id === optionsMemberId) ??
-      (() => {
-        const ghost = ghostMembers.find((g) => g.id === optionsMemberId);
-        if (!ghost) return null;
-        return {
-          id: ghost.id,
-          name: ghost.name,
-          lat: ghost.position?.lat,
-          lng: ghost.position?.lng,
-          battery: ghost.battery,
-          status: 'GHOST',
-          hasFix: true,
-          phase: ghost.phase,
-          elapsedLabel: ghost.elapsedLabel,
-        };
-      })()
+    (() => {
+      const ghost = ghostMembers.find((g) => g.id === optionsMemberId);
+      if (!ghost) return null;
+      return {
+        id: ghost.id,
+        name: ghost.name,
+        lat: ghost.position?.lat,
+        lng: ghost.position?.lng,
+        battery: ghost.battery,
+        status: 'GHOST',
+        hasFix: true,
+        phase: ghost.phase,
+        elapsedLabel: ghost.elapsedLabel,
+      };
+    })()
     : null;
   // The group panel's search box: at the head of the buildings list, and above the members.
   const groupSearch = (
@@ -2177,20 +2225,20 @@ const App = () => {
     }
     return (
       <>
-      {updateOverlay}
-      <AuthTerminal
-        email={email}
-        setEmail={setEmail}
-        password={password}
-        setPassword={setPassword}
-        username={username}
-        setUsername={setUsername}
-        showPassword={showPassword}
-        setShowPassword={setShowPassword}
-        executeAuthDirective={executeAuthDirective}
-        loginMethod={loginMethod}
-        latency={latency}
-      />
+        {updateOverlay}
+        <AuthTerminal
+          email={email}
+          setEmail={setEmail}
+          password={password}
+          setPassword={setPassword}
+          username={username}
+          setUsername={setUsername}
+          showPassword={showPassword}
+          setShowPassword={setShowPassword}
+          executeAuthDirective={executeAuthDirective}
+          loginMethod={loginMethod}
+          latency={latency}
+        />
       </>
     );
   }
@@ -2298,306 +2346,307 @@ const App = () => {
     <div className="h-screen w-full bg-black flex overflow-hidden text-white font-inter selection:bg-accent-soft bg-dots">
 
       {/* Top bar and sharing chip (components/map/TopBar.jsx) */}
-      <TopBar
-        isSatellite={isSatellite}
-      />
+      {!isNavigatingMode && (
+        <TopBar
+          isSatellite={isSatellite}
+        />
+      )}
 
       {/* Sidebar Panel — visible on desktop always; on a phone, a sheet that is open when
           mobileView is 'matrix' or 'squad' and can be dragged down by its handle strip. */}
-      <motion.div
-        // Its y is panelY, moved to the resting height by the effect on panelTarget, and by
-        // the finger while dragged (the handle strip and header start the drag).
-        data-height={isMobile ? (sheetOpen ? panelHeight : 'closed') : undefined}
-        drag={isMobile && sheetOpen ? 'y' : false}
-        dragListener={false}
-        dragControls={sheetDragControls}
-        dragConstraints={{ top: 0, bottom: panelStopsNow.closed }}
-        // Follows the finger almost 1:1 between the heights, and rubber-bands above full.
-        dragElastic={{ top: 0.06, bottom: 0.2 }}
-        dragMomentum={false}
-        onDragStart={() => { sheetDraggedRef.current = true; panelDragStartRef.current = panelTarget; }}
-        onDragEnd={(_event, info) => {
-          // Decide from where the throw is GOING, not where the finger let go: project the
-          // release velocity forward (Apple's scroll-deceleration projection), and settle at
-          // the nearest height to that: peek, half, full, or closed. Where it was let go is
-          // where the drag started plus how far it went, kept on the panel.
-          const letGo = Math.min(panelStopsNow.closed, Math.max(0, panelDragStartRef.current + info.offset.y));
-          const next = snapPanel(letGo, info.velocity.y, panelStopsNow);
-          haptic('snap');
-          animateMotion(panelY, panelStopsNow[next], reduceMotion ? { duration: 0 } : SHEET_SPRING);
-          if (next === 'closed') setMobileView('grid');
-          else setPanelHeight(next);
-        }}
-        ref={sheetRef}
-        className={`${
-          isMobile
-            ? `fixed inset-x-0 bottom-16 z-[900] flex flex-col glass-floating text-text rounded-t-[28px] ${
-                sheetOpen ? 'pointer-events-auto' : 'pointer-events-none invisible'
+      {!isNavigatingMode && (
+        <motion.div
+          // Its y is panelY, moved to the resting height by the effect on panelTarget, and by
+          // the finger while dragged (the handle strip and header start the drag).
+          data-height={isMobile ? (sheetOpen ? panelHeight : 'closed') : undefined}
+          drag={isMobile && sheetOpen ? 'y' : false}
+          dragListener={false}
+          dragControls={sheetDragControls}
+          dragConstraints={{ top: 0, bottom: panelStopsNow.closed }}
+          // Follows the finger almost 1:1 between the heights, and rubber-bands above full.
+          dragElastic={{ top: 0.06, bottom: 0.2 }}
+          dragMomentum={false}
+          onDragStart={() => { sheetDraggedRef.current = true; panelDragStartRef.current = panelTarget; }}
+          onDragEnd={(_event, info) => {
+            // Decide from where the throw is GOING, not where the finger let go: project the
+            // release velocity forward (Apple's scroll-deceleration projection), and settle at
+            // the nearest height to that: peek, half, full, or closed. Where it was let go is
+            // where the drag started plus how far it went, kept on the panel.
+            const letGo = Math.min(panelStopsNow.closed, Math.max(0, panelDragStartRef.current + info.offset.y));
+            const next = snapPanel(letGo, info.velocity.y, panelStopsNow);
+            haptic('snap');
+            animateMotion(panelY, panelStopsNow[next], reduceMotion ? { duration: 0 } : SHEET_SPRING);
+            if (next === 'closed') setMobileView('grid');
+            else setPanelHeight(next);
+          }}
+          ref={sheetRef}
+          className={`${isMobile
+              ? `fixed inset-x-0 bottom-16 z-[900] flex flex-col glass-floating text-text rounded-t-[28px] ${sheetOpen ? 'pointer-events-auto' : 'pointer-events-none invisible'
               }`
-            : 'hidden md:flex w-84 glass-floating text-text rounded-3xl fixed z-[900] flex-col pointer-events-auto top-20 left-6 bottom-6 h-auto'
-        }`}
-        // Starts under the header instead of behind it (it used to start at the very top, so
-        // its handle and MATRIX/SQUAD indicator were hidden under the header).
-        style={isMobile ? { top: BELOW_TOP_BAR, y: panelY } : undefined}
-        onTouchStart={(e) => { e.currentTarget._touchStartX = e.touches[0].clientX; }}
-        onTouchEnd={(e) => {
-          const startX = e.currentTarget._touchStartX;
-          const endX = e.changedTouches[0].clientX;
-          const diff = startX - endX;
-          if (diff > 60) {
-            // Swiped LEFT → go to Squad
-            setActiveTab('users'); setSelectedItem(null);
-            if (isMobile) setMobileView('squad');
-          } else if (diff < -60) {
-            // Swiped RIGHT → go to Matrix
-            setActiveTab('buildings'); setSelectedItem(null);
-            if (isMobile) setMobileView('matrix');
-          }
-        }}
-      >
-        {/* The header (components/group/GroupHeader.jsx): "Your group", your role, the code and
+              : 'hidden md:flex w-84 glass-floating text-text rounded-3xl fixed z-[900] flex-col pointer-events-auto top-20 left-6 bottom-6 h-auto'
+            }`}
+          // Starts under the header instead of behind it (it used to start at the very top, so
+          // its handle and MATRIX/SQUAD indicator were hidden under the header).
+          style={isMobile ? { top: BELOW_TOP_BAR, y: panelY } : undefined}
+          onTouchStart={(e) => { e.currentTarget._touchStartX = e.touches[0].clientX; }}
+          onTouchEnd={(e) => {
+            const startX = e.currentTarget._touchStartX;
+            const endX = e.changedTouches[0].clientX;
+            const diff = startX - endX;
+            if (diff > 60) {
+              // Swiped LEFT → go to Squad
+              setActiveTab('users'); setSelectedItem(null);
+              if (isMobile) setMobileView('squad');
+            } else if (diff < -60) {
+              // Swiped RIGHT → go to Matrix
+              setActiveTab('buildings'); setSelectedItem(null);
+              if (isMobile) setMobileView('matrix');
+            }
+          }}
+        >
+          {/* The header (components/group/GroupHeader.jsx): "Your group", your role, the code and
             Copy. On a phone it is the panel's drag handle too: pressing anywhere on it starts the
             drag, and a plain tap still closes the panel, as the handle did. */}
-        <div
-          className={`${keyboardUp ? 'hidden ' : ''}shrink-0 select-none pt-3 md:pt-4 touch-none md:touch-auto cursor-grab active:cursor-grabbing md:cursor-auto`}
-          data-testid="group-panel-header"
-          data-no-ping
-          onPointerDown={(e) => { if (!isMobile) return; sheetDraggedRef.current = false; sheetDragControls.start(e); }}
-          // A drag that snapped back still ends in a click; only a real tap closes.
-          // At peek a tap opens it to half; at half or full it closes, as the handle did.
-          onClick={() => {
-            if (!isMobile || sheetDraggedRef.current) return;
-            if (panelHeight === 'peek') setPanelHeight('half');
-            else setMobileView('grid');
-          }}
-          ref={panelHeaderRef}
-        >
-          <div className="md:hidden w-10 h-1 rounded-full bg-[var(--glass-border)] mx-auto mb-3" aria-hidden="true" />
-          <GroupHeader isLead={squadRole === 'OWNER'} code={squadCode}>
-            {/* The peek height's lines: laid out always on a phone (so peek's height is known
+          <div
+            className={`${keyboardUp ? 'hidden ' : ''}shrink-0 select-none pt-3 md:pt-4 touch-none md:touch-auto cursor-grab active:cursor-grabbing md:cursor-auto`}
+            data-testid="group-panel-header"
+            data-no-ping
+            onPointerDown={(e) => { if (!isMobile) return; sheetDraggedRef.current = false; sheetDragControls.start(e); }}
+            // A drag that snapped back still ends in a click; only a real tap closes.
+            // At peek a tap opens it to half; at half or full it closes, as the handle did.
+            onClick={() => {
+              if (!isMobile || sheetDraggedRef.current) return;
+              if (panelHeight === 'peek') setPanelHeight('half');
+              else setMobileView('grid');
+            }}
+            ref={panelHeaderRef}
+          >
+            <div className="md:hidden w-10 h-1 rounded-full bg-[var(--glass-border)] mx-auto mb-3" aria-hidden="true" />
+            <GroupHeader isLead={squadRole === 'OWNER'} code={squadCode}>
+              {/* The peek height's lines: laid out always on a phone (so peek's height is known
                 at every height), shown only at peek. */}
-            {isMobile && (
-              <div ref={peekWrapRef} className="grid" style={{ gridTemplateRows: atPeek ? '1fr' : '0fr' }} inert={!atPeek} aria-hidden={!atPeek}>
-                <div ref={peekLinesRef} className="overflow-hidden min-h-0">
-                  <PeekLines
-                    requests={pendingRequests.length}
-                    onRequests={squadRole === 'OWNER' ? () => setShowRequestsModal(true) : null}
-                    names={users.filter(u => !blockedUserIds.includes(u.id)).map(u => u.name || '?')}
-                    counts={peekCounts}
-                  />
+              {isMobile && (
+                <div ref={peekWrapRef} className="grid" style={{ gridTemplateRows: atPeek ? '1fr' : '0fr' }} inert={!atPeek} aria-hidden={!atPeek}>
+                  <div ref={peekLinesRef} className="overflow-hidden min-h-0">
+                    <PeekLines
+                      requests={pendingRequests.length}
+                      onRequests={squadRole === 'OWNER' ? () => setShowRequestsModal(true) : null}
+                      names={users.filter(u => !blockedUserIds.includes(u.id)).map(u => u.name || '?')}
+                      counts={peekCounts}
+                    />
+                  </div>
                 </div>
-              </div>
-            )}
-          </GroupHeader>
-          {/* Measures the gesture bar's inset, for the room left under the buttons at peek. */}
-          <div ref={insetProbeRef} aria-hidden="true" className="absolute w-0 invisible pointer-events-none" style={{ height: 'env(safe-area-inset-bottom)' }} />
-        </div>
+              )}
+            </GroupHeader>
+            {/* Measures the gesture bar's inset, for the room left under the buttons at peek. */}
+            <div ref={insetProbeRef} aria-hidden="true" className="absolute w-0 invisible pointer-events-none" style={{ height: 'env(safe-area-inset-bottom)' }} />
+          </div>
 
 
-        {/* List Content */}
-        {/* Room at the bottom on a phone to scroll the last rows clear of the Emergency and
+          {/* List Content */}
+          {/* Room at the bottom on a phone to scroll the last rows clear of the Emergency and
             meeting point buttons: they stand 10 rem above the screen's bottom edge plus the
             gesture bar's inset, and this panel ends 4 rem up without that inset. 8 rem plus the
             inset leaves 2 rem between the last row and the buttons on any phone. */}
-        <div data-testid="group-panel-list" className={`${atPeek ? 'invisible ' : ''}flex-1 overflow-y-auto p-4 pt-1 pb-[calc(8rem+env(safe-area-inset-bottom))] md:pb-4 custom-scrollbar ${activeTab === 'buildings' ? 'space-y-3' : 'space-y-1'}`}>
-          <SegmentedControl
-            label={GROUP_TABS.label}
-            value={activeTab === 'buildings' ? 'buildings' : 'users'}
-            onChange={(tab) => {
-              setActiveTab(tab); setSelectedItem(null);
-              if (isMobile) setMobileView(tab === 'buildings' ? 'matrix' : 'squad');
-            }}
-            options={[
-              { value: 'users', label: GROUP_TABS.members },
-              { value: 'buildings', label: GROUP_TABS.buildings },
-            ]}
-          />
-          {/* Buildings: the search heads the list. (Members: it sits above the members list,
+          <div data-testid="group-panel-list" className={`${atPeek ? 'invisible ' : ''}flex-1 overflow-y-auto p-4 pt-1 pb-[calc(8rem+env(safe-area-inset-bottom))] md:pb-4 custom-scrollbar ${activeTab === 'buildings' ? 'space-y-3' : 'space-y-1'}`}>
+            <SegmentedControl
+              label={GROUP_TABS.label}
+              value={activeTab === 'buildings' ? 'buildings' : 'users'}
+              onChange={(tab) => {
+                setActiveTab(tab); setSelectedItem(null);
+                if (isMobile) setMobileView(tab === 'buildings' ? 'matrix' : 'squad');
+              }}
+              options={[
+                { value: 'users', label: GROUP_TABS.members },
+                { value: 'buildings', label: GROUP_TABS.buildings },
+              ]}
+            />
+            {/* Buildings: the search heads the list. (Members: it sits above the members list,
               under the controls, so a Group Lead's tools come higher at half height.) */}
-          {activeTab === 'buildings' && groupSearch}
+            {activeTab === 'buildings' && groupSearch}
 
-          {/* Category Filter Pills (Minimalist Apple/Glass Design) */}
-          {activeTab === 'buildings' && (
-            <div className="flex items-center gap-2 overflow-x-auto pb-1 pt-0.5 no-scrollbar -mx-1 px-1">
-              {[
-                { id: 'ALL', label: 'All' },
-                { id: 'ACADEMIC', label: 'Academic' },
-                { id: 'ENGINEERING', label: 'Engineering' },
-                { id: 'MEDICAL', label: 'Medical' },
-                { id: 'RESIDENTIAL', label: 'Hostels' },
-                { id: 'LOGISTICS', label: 'Cafes & Hubs' },
-              ].map((cat) => {
-                const isSelected = buildingCategoryFilter === cat.id;
-                const count = cat.id === 'ALL'
-                  ? SRM_MASTER_DATABASE.length
-                  : SRM_MASTER_DATABASE.filter(b => b.category === cat.id).length;
-                return (
-                  <button
-                    key={cat.id}
-                    type="button"
-                    onClick={() => setBuildingCategoryFilter(cat.id)}
-                    className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-medium font-ui transition-all duration-150 flex items-center gap-1.5 cursor-pointer border ${
-                      isSelected
-                        ? 'bg-accent text-accent-on border-accent shadow-sm'
-                        : 'glass-pill text-text-secondary hover:text-text'
-                    }`}
-                  >
-                    <span>{cat.label}</span>
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-normal ${isSelected ? 'bg-white/20 text-accent-on' : 'bg-sunken text-text-secondary'}`}>
-                      {count}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
+            {/* Category Filter Pills (Minimalist Apple/Glass Design) */}
+            {activeTab === 'buildings' && (
+              <div className="flex items-center gap-2 overflow-x-auto pb-1 pt-0.5 no-scrollbar -mx-1 px-1">
+                {[
+                  { id: 'ALL', label: 'All' },
+                  { id: 'ACADEMIC', label: 'Academic' },
+                  { id: 'ENGINEERING', label: 'Engineering' },
+                  { id: 'MEDICAL', label: 'Medical' },
+                  { id: 'RESIDENTIAL', label: 'Hostels' },
+                  { id: 'LOGISTICS', label: 'Cafes & Hubs' },
+                ].map((cat) => {
+                  const isSelected = buildingCategoryFilter === cat.id;
+                  const count = cat.id === 'ALL'
+                    ? SRM_MASTER_DATABASE.length
+                    : SRM_MASTER_DATABASE.filter(b => b.category === cat.id).length;
+                  return (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      onClick={() => setBuildingCategoryFilter(cat.id)}
+                      className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-medium font-ui transition-all duration-150 flex items-center gap-1.5 cursor-pointer border ${isSelected
+                          ? 'bg-accent text-accent-on border-accent shadow-sm'
+                          : 'glass-pill text-text-secondary hover:text-text'
+                        }`}
+                    >
+                      <span>{cat.label}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-normal ${isSelected ? 'bg-white/20 text-accent-on' : 'bg-sunken text-text-secondary'}`}>
+                        {count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
-          {/* Nearby Places Section Header */}
-          {activeTab === 'buildings' && (
-            <div className="flex items-center justify-between pt-1 pb-0.5">
-              <h3 className="text-sm font-semibold font-ui text-text flex items-center gap-2 tracking-tight">
-                <span>Nearby Places</span>
-                <span className="text-xs font-normal text-text-secondary">
-                  ({SRM_MASTER_DATABASE.filter(b => matchesSearch(b.name) && (buildingCategoryFilter === 'ALL' || b.category === buildingCategoryFilter)).length})
-                </span>
-              </h3>
-            </div>
-          )}
+            {/* Nearby Places Section Header */}
+            {activeTab === 'buildings' && (
+              <div className="flex items-center justify-between pt-1 pb-0.5">
+                <h3 className="text-sm font-semibold font-ui text-text flex items-center gap-2 tracking-tight">
+                  <span>Nearby Places</span>
+                  <span className="text-xs font-normal text-text-secondary">
+                    ({SRM_MASTER_DATABASE.filter(b => matchesSearch(b.name) && (buildingCategoryFilter === 'ALL' || b.category === buildingCategoryFilter)).length})
+                  </span>
+                </h3>
+              </div>
+            )}
 
-          {activeTab === 'buildings' && searchQuery.trim() && !SRM_MASTER_DATABASE.some(b => matchesSearch(b.name)) && (
-            <p className="py-3 font-ui text-secondary text-text-secondary" data-testid="buildings-no-match">{GROUP_BUILDINGS_LIST.noMatch(searchQuery.trim())}</p>
-          )}
-          {/* The Group Lead's tools come first, before Your location (the design has them after):
+            {activeTab === 'buildings' && searchQuery.trim() && !SRM_MASTER_DATABASE.some(b => matchesSearch(b.name)) && (
+              <p className="py-3 font-ui text-secondary text-text-secondary" data-testid="buildings-no-match">{GROUP_BUILDINGS_LIST.noMatch(searchQuery.trim())}</p>
+            )}
+            {/* The Group Lead's tools come first, before Your location (the design has them after):
               at half height on a 360 px phone they would otherwise sit under the Emergency button,
               which stays above the panel. */}
-          {activeTab === 'users' && squadRole === 'OWNER' && !keyboardUp && (
-            <LeadTools
-              requests={pendingRequests.length}
-              onRequests={() => setShowRequestsModal(true)}
-              refresh={telemetrySync}
-              onRefresh={requestTelemetrySync}
-              choosing={isTargetingMode}
-              onMeetingPoint={() => {
-                const choosing = !isTargetingMode;
-                setIsTargetingMode(choosing);
-                // On a phone the open panel covers the map the spot is chosen on.
-                if (choosing && isMobile) setMobileView('grid');
-              }}
-              hasMeetingPoint={Boolean(activeWaypoint)}
-              onRemoveMeetingPoint={() => socket.emit('clear-waypoint', squadCode)}
-            />
-          )}
-          {/* Your location: Live, Paused or Hidden (components/group/SharingControl.jsx). */}
-          {activeTab === 'users' && (
-            <SharingControl
-              mode={telemetryMode}
-              onChange={(mode) => { telemetryModeRef.current = mode; setTelemetryMode(mode); }}
-              waiting={!liveLocation}
-              pausedNoSpot={!pausedHasSpot}
-              polling={sysConfig.polling}
-            />
-          )}
-          {/* The members list's heading and its states (components/group/MembersHeading.jsx). */}
-          {activeTab === 'users' && (
-            <MembersHeading count={users.filter(u => !blockedUserIds.includes(u.id)).length + ghostMembers.length + 1} updatedAt={rosterAt} />
-          )}
-          {activeTab === 'users' && groupSearch}
-          {activeTab === 'users' && rosterAt === null && <MembersLoading />}
-          {activeTab === 'users' && rosterAt !== null && !users.some(u => !blockedUserIds.includes(u.id)) && ghostMembers.length === 0 && (
-            <MembersEmpty code={squadCode} isLead={squadRole === 'OWNER'} />
-          )}
-          {activeTab === 'users' && searchQuery.trim() && !users.some(u => !blockedUserIds.includes(u.id) && matchesSearch(u.name)) && !ghostMembers.some(g => matchesSearch(g.name)) && (users.length > 0 || ghostMembers.length > 0) && (
-            <p className="py-3 font-ui text-secondary text-text-secondary" data-testid="members-no-match">{GROUP_MEMBERS_LIST.noMatch(searchQuery.trim())}</p>
-          )}
-          <AnimatePresence mode="popLayout" initial={false}>
-            {activeTab === 'buildings' ? (
-              SRM_MASTER_DATABASE
-                .filter(b => matchesSearch(b.name) && (buildingCategoryFilter === 'ALL' || b.category === buildingCategoryFilter))
-                .map((building, idx) => (
-                  <motion.div
-                    layout
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.98 }}
-                    transition={{
-                      opacity: { duration: 0.22, ease: [0.22, 1, 0.36, 1] },
-                      y: { duration: 0.24, ease: [0.22, 1, 0.36, 1], delay: Math.min(idx, 5) * 0.03 },
-                      scale: { duration: 0.18, ease: [0.22, 1, 0.36, 1] },
-                      layout: { duration: 0.25, ease: [0.22, 1, 0.36, 1] },
-                    }}
-                    key={building.id}
-                  >
-                    <BuildingRow
-                      building={building}
-                      me={liveLocation}
-                      onOpen={() => handleBuildingTap(building)}
-                      onArScan={() => setArTarget({ lat: building.lat, lng: building.lng, name: building.name })}
-                      onNavigate={() => { handleWaypointSelect(building); showBuildingOnMap(building); }}
-                    />
-                  </motion.div>
-                ))
-            ) : (
-              // A flat array, not a <> fragment. AnimatePresence mode="popLayout" wraps
-              // each direct child in a ref-bearing element to measure it, and a Fragment
-              // cannot take a ref — React logged "Invalid prop `ref` supplied to
-              // React.Fragment" for every row on every re-render (485 in one session).
-              // An array of keyed children is what AnimatePresence wants anyway.
-              [
-                /* Persistent per-row ghost badge — independent of the transient
-                    top-of-screen banner, so anyone opening the Squad panel later
-                   still sees who's dark, not just whoever was looking when it fired. */
-                ...ghostMembers.filter(g => matchesSearch(g.name)).map(ghost => (
-                  <motion.div
-                    layout
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    key={`ghost-row-${ghost.id}`}
-                    data-testid="lost-member-row"
-                    onClick={() => {
-                      handleFocus(ghost.position, null);
-                      setOptionsMemberId(ghost.id);
-                    }}
-                    className="flex items-center gap-3 p-3 rounded-2xl glass-panel font-ui text-text cursor-pointer hover:bg-surface/90 transition-all duration-150"
-                  >
-                    <Avatar name={ghost.name || '?'} dashed className="opacity-70" />
-                    <div className="flex-1 min-w-0">
-                      <h4 className="text-heading truncate text-text-secondary">{ghost.name}</h4>
-                      <p className="mt-0.5 text-secondary text-text-secondary">
-                        {ghost.phase === 'expired' ? GROUP_MEMBERS.lastSeen(ghost.elapsedLabel) : GROUP_MEMBERS.lostConnection(ghost.elapsedLabel)}
-                      </p>
-                    </div>
-                    <WifiOff size={20} className="text-text-secondary shrink-0" aria-hidden="true" />
-                  </motion.div>
-                )),
-                // Nearest first (by straight-line distance from this phone); members with no
-                // fix yet go last. See SquadMemberCard for the dial and freshness line.
-                ...sortByDistance(users.filter(u => !blockedUserIds.includes(u.id) && matchesSearch(u.name)), liveLocation).map(user => (
-                <motion.div
-                  layout
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  key={user.id}
-                >
-                  <SquadMemberCard
-                    member={user}
-                    me={liveLocation}
-                    heading={heading}
-                    headingLive={hasHeadingReading}
-                    onOptions={(m) => setOptionsMemberId(m.id)}
-                  />
-                </motion.div>
-                )),
-              ]
+            {activeTab === 'users' && squadRole === 'OWNER' && !keyboardUp && (
+              <LeadTools
+                requests={pendingRequests.length}
+                onRequests={() => setShowRequestsModal(true)}
+                refresh={telemetrySync}
+                onRefresh={requestTelemetrySync}
+                choosing={isTargetingMode}
+                onMeetingPoint={() => {
+                  const choosing = !isTargetingMode;
+                  setIsTargetingMode(choosing);
+                  // On a phone the open panel covers the map the spot is chosen on.
+                  if (choosing && isMobile) setMobileView('grid');
+                }}
+                hasMeetingPoint={Boolean(activeWaypoint)}
+                onRemoveMeetingPoint={() => socket.emit('clear-waypoint', squadCode)}
+              />
             )}
-          </AnimatePresence>
-          {activeTab === 'users' && <LeaveGroupButton onClick={() => setShowLeaveConfirm(true)} />}
-          {/* The panel rests lower than full by this much: room to scroll the last rows up into
+            {/* Your location: Live, Paused or Hidden (components/group/SharingControl.jsx). */}
+            {activeTab === 'users' && (
+              <SharingControl
+                mode={telemetryMode}
+                onChange={(mode) => { telemetryModeRef.current = mode; setTelemetryMode(mode); }}
+                waiting={!liveLocation}
+                pausedNoSpot={!pausedHasSpot}
+                polling={sysConfig.polling}
+              />
+            )}
+            {/* The members list's heading and its states (components/group/MembersHeading.jsx). */}
+            {activeTab === 'users' && (
+              <MembersHeading count={users.filter(u => !blockedUserIds.includes(u.id)).length + ghostMembers.length + 1} updatedAt={rosterAt} />
+            )}
+            {activeTab === 'users' && groupSearch}
+            {activeTab === 'users' && rosterAt === null && <MembersLoading />}
+            {activeTab === 'users' && rosterAt !== null && !users.some(u => !blockedUserIds.includes(u.id)) && ghostMembers.length === 0 && (
+              <MembersEmpty code={squadCode} isLead={squadRole === 'OWNER'} />
+            )}
+            {activeTab === 'users' && searchQuery.trim() && !users.some(u => !blockedUserIds.includes(u.id) && matchesSearch(u.name)) && !ghostMembers.some(g => matchesSearch(g.name)) && (users.length > 0 || ghostMembers.length > 0) && (
+              <p className="py-3 font-ui text-secondary text-text-secondary" data-testid="members-no-match">{GROUP_MEMBERS_LIST.noMatch(searchQuery.trim())}</p>
+            )}
+            <AnimatePresence mode="popLayout" initial={false}>
+              {activeTab === 'buildings' ? (
+                SRM_MASTER_DATABASE
+                  .filter(b => matchesSearch(b.name) && (buildingCategoryFilter === 'ALL' || b.category === buildingCategoryFilter))
+                  .map((building, idx) => (
+                    <motion.div
+                      layout
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.98 }}
+                      transition={{
+                        opacity: { duration: 0.22, ease: [0.22, 1, 0.36, 1] },
+                        y: { duration: 0.24, ease: [0.22, 1, 0.36, 1], delay: Math.min(idx, 5) * 0.03 },
+                        scale: { duration: 0.18, ease: [0.22, 1, 0.36, 1] },
+                        layout: { duration: 0.25, ease: [0.22, 1, 0.36, 1] },
+                      }}
+                      key={building.id}
+                    >
+                      <BuildingRow
+                        building={building}
+                        me={liveLocation}
+                        onOpen={() => handleBuildingTap(building)}
+                        onArScan={() => setArTarget({ lat: building.lat, lng: building.lng, name: building.name })}
+                        onNavigate={() => handleWaypointSelect(building)}
+                      />
+                    </motion.div>
+                  ))
+              ) : (
+                // A flat array, not a <> fragment. AnimatePresence mode="popLayout" wraps
+                // each direct child in a ref-bearing element to measure it, and a Fragment
+                // cannot take a ref — React logged "Invalid prop `ref` supplied to
+                // React.Fragment" for every row on every re-render (485 in one session).
+                // An array of keyed children is what AnimatePresence wants anyway.
+                [
+                  /* Persistent per-row ghost badge — independent of the transient
+                      top-of-screen banner, so anyone opening the Squad panel later
+                     still sees who's dark, not just whoever was looking when it fired. */
+                  ...ghostMembers.filter(g => matchesSearch(g.name)).map(ghost => (
+                    <motion.div
+                      layout
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      key={`ghost-row-${ghost.id}`}
+                      data-testid="lost-member-row"
+                      onClick={() => {
+                        handleFocus(ghost.position, null);
+                        setOptionsMemberId(ghost.id);
+                      }}
+                      className="flex items-center gap-3 p-3 rounded-2xl glass-panel font-ui text-text cursor-pointer hover:bg-surface/90 transition-all duration-150"
+                    >
+                      <Avatar name={ghost.name || '?'} dashed className="opacity-70" />
+                      <div className="flex-1 min-w-0">
+                        <h4 className="text-heading truncate text-text-secondary">{ghost.name}</h4>
+                        <p className="mt-0.5 text-secondary text-text-secondary">
+                          {ghost.phase === 'expired' ? GROUP_MEMBERS.lastSeen(ghost.elapsedLabel) : GROUP_MEMBERS.lostConnection(ghost.elapsedLabel)}
+                        </p>
+                      </div>
+                      <WifiOff size={20} className="text-text-secondary shrink-0" aria-hidden="true" />
+                    </motion.div>
+                  )),
+                  // Nearest first (by straight-line distance from this phone); members with no
+                  // fix yet go last. See SquadMemberCard for the dial and freshness line.
+                  ...sortByDistance(users.filter(u => !blockedUserIds.includes(u.id) && matchesSearch(u.name)), liveLocation).map(user => (
+                    <motion.div
+                      layout
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      key={user.id}
+                    >
+                      <SquadMemberCard
+                        member={user}
+                        me={liveLocation}
+                        heading={heading}
+                        headingLive={hasHeadingReading}
+                        onOptions={(m) => setOptionsMemberId(m.id)}
+                      />
+                    </motion.div>
+                  )),
+                ]
+              )}
+            </AnimatePresence>
+            {activeTab === 'users' && <LeaveGroupButton onClick={() => setShowLeaveConfirm(true)} />}
+            {/* The panel rests lower than full by this much: room to scroll the last rows up into
               view at half. */}
-          {isMobile && sheetOpen && panelStopsNow[panelHeight] > 0 && <div aria-hidden="true" style={{ height: panelStopsNow[panelHeight] }} />}
-        </div>
-      </motion.div>
+            {isMobile && sheetOpen && panelStopsNow[panelHeight] > 0 && <div aria-hidden="true" style={{ height: panelStopsNow[panelHeight] }} />}
+          </div>
+        </motion.div>
+      )}
 
       {/* --- WAITING FOR APPROVAL, AND "YOU'RE IN" (redesign P3) --- */}
       {/* Full screens over the map and its tab bar, under the Emergency button (see
@@ -2657,10 +2706,11 @@ const App = () => {
           the location banner used to cover the Group Lead's buttons there. */}
       <div
         data-testid="map-top-stack"
-        className="absolute inset-x-3 z-[850] md:z-[1000] md:left-1/2 md:right-auto md:w-[28rem] md:-translate-x-1/2 pointer-events-none flex flex-col gap-2"
-        style={{ top: BELOW_TOP_BAR }}
+        className={`absolute inset-x-3 z-[850] md:z-[1000] md:left-1/2 md:right-auto ${isNavigatingMode ? 'md:w-[32rem]' : 'md:w-[28rem]'
+          } md:-translate-x-1/2 pointer-events-none flex flex-col gap-2`}
+        style={isNavigatingMode ? { top: 'calc(env(safe-area-inset-top, 0px) + 0.75rem)' } : { top: BELOW_TOP_BAR }}
       >
-        {!(isTargetingMode && isMobile) && !locationError && !showDeclinedCard && <SharingChip mode={telemetryMode} waiting={!liveLocation} pausedNoSpot={!pausedHasSpot} />}
+        {!isNavigatingMode && !(isTargetingMode && isMobile) && !locationError && !showDeclinedCard && <SharingChip mode={telemetryMode} waiting={!liveLocation} pausedNoSpot={!pausedHasSpot} />}
         <AnimatePresence initial={false}>
           {/* Choosing a meeting point (a phone's meeting point button). */}
           {isTargetingMode && (
@@ -2686,11 +2736,41 @@ const App = () => {
               <LocationProblemCard kind="denied" onDismiss={() => setDeclinedCardDismissed(true)} onTurnOn={turnOnLocation} />
             </motion.div>
           )}
-          {(routeStart || routeData) && (
-            <motion.div key="route-card" className="pointer-events-auto" {...fade()}>
-              <RouteCard start={routeStart} end={routeEnd} data={displayedRouteData} onEnd={clearRoute} />
+          {isNavigatingMode && activeNavTarget ? (
+            <motion.div key="turn-instruction-card" className="pointer-events-auto w-full" {...fade()}>
+              <TurnInstructionCard
+                currentStep={navigationController.currentStep}
+                nextStep={navigationController.nextStep}
+                distanceToNextMeters={navigationController.distanceToNextStepMeters}
+                isRerouting={navigationController.isRerouting}
+                rerouteError={navigationController.rerouteError}
+                onRetryReroute={navigationController.retryReroute}
+                onEnd={() => {
+                  setIsNavigatingMode(false);
+                  clearRoute();
+                }}
+                destinationName={activeNavTarget.name}
+              />
             </motion.div>
-          )}
+          ) : (routeStart || routeData) ? (
+            <motion.div key="route-card" className="pointer-events-auto" {...fade()}>
+              <RouteCard
+                start={routeStart}
+                end={routeEnd}
+                data={displayedRouteData}
+                onEnd={clearRoute}
+                onStartNavigation={() => {
+                  if (!locationReady) {
+                    turnOnLocation();
+                  }
+                  setIsNavigatingMode(true);
+                  if (routeEnd) {
+                    handleFocus(routeStart?.name === 'MY_LOCATION' && liveLocation ? liveLocation : routeEnd, null);
+                  }
+                }}
+              />
+            </motion.div>
+          ) : null}
         </AnimatePresence>
       </div>
       {/* "Finding your location…" while the first fix is on its way. */}
@@ -2718,12 +2798,18 @@ const App = () => {
               onZoomChange={setCurrentZoom}
               onMapClick={handleMapClick}
               onFocus={handleFocus}
+              onMapInstance={(map) => { leafletMapRef.current = map; }}
+              onUserInteraction={() => {
+                if (isNavigatingMode) navigationController.handleUserMapInteraction();
+              }}
               liveLocation={showSelfMarker ? selfMarkerAt : null}
               liveIndoor={selfIndoor}
               indoorView={indoorView}
-              liveIsNavigating={isNavigating}
+              liveIsNavigating={isNavigating || isNavigatingMode}
               liveHeading={liveHeading}
               currentZoom={currentZoom}
+              currentRoadName={isNavigatingMode ? navigationController.currentStep?.instruction : null}
+              routeSteps={isNavigatingMode ? navigationController.activeRoute?.steps : null}
               users={users}
               blockedUserIds={blockedUserIds}
               ghostMembers={ghostMembers}
@@ -2744,80 +2830,87 @@ const App = () => {
             />
           </Suspense>
         ) : (
-        <GoogleMapReact
-          bootstrapURLKeys={{ key: GOOGLE_MAPS_API_KEY }}
-          center={mapProps.center}
-          options={mapOptions}
+          <GoogleMapReact
+            bootstrapURLKeys={{ key: GOOGLE_MAPS_API_KEY }}
+            center={mapProps.center}
+            options={mapOptions}
 
-          onClick={handleMapClick}
+            onClick={handleMapClick}
 
-          zoom={mapProps.zoom}
-          onChange={({ zoom }) => setCurrentZoom(zoom)}
+            zoom={mapProps.zoom}
+            onChange={({ zoom }) => setCurrentZoom(zoom)}
 
-          yesIWantToUseGoogleMapApiInternals
-          onGoogleApiLoaded={({ map }) => {
-            mapRef.current = map;
-            map.setTilt(0);
-            googleDriverOffRef.current?.();
-            googleDriverOffRef.current = registerMapDriver({
-              element: map.getDiv?.(),
-              getView: () => ({ lat: map.getCenter().lat(), lng: map.getCenter().lng(), zoom: map.getZoom() }),
-              // Fractional zoom only exists on vector maps (moveCamera); raster maps take whole levels.
-              setView: ({ lat, lng, zoom }) => {
-                if (typeof map.moveCamera === 'function') map.moveCamera({ center: { lat, lng }, zoom });
-                else { map.setCenter({ lat, lng }); map.setZoom(Math.round(zoom)); }
-              },
-            });
-            //  GREEN LIGHT: Map canvas is live — safe to draw saved zones now
-            setIsMapReady(true);
-          }}
-        >
-          {showSelfMarker && (
-            <div
-              key="live-user"
-              lat={selfMarkerAt.lat}
-              lng={selfMarkerAt.lng}
-              onClick={() => handleFocus(selfMarkerAt, null)}
-              style={{ cursor: 'pointer' }}
-            >
-              {selfIndoor && <ConfidenceHalo confidence={selfIndoor.confidence} color="#10B981" />}
-              <LiveLocationMarker
-                zoom={currentZoom}
-                isNavigating={isNavigating}
-                heading={liveHeading}
-              />
-            </div>
-          )}
-          {/* Buildings render as a single red dot marker each, not a traced outline —
+            yesIWantToUseGoogleMapApiInternals
+            onGoogleApiLoaded={({ map }) => {
+              mapRef.current = map;
+              map.setTilt(0);
+              googleDriverOffRef.current?.();
+              googleDriverOffRef.current = registerMapDriver({
+                element: map.getDiv?.(),
+                getView: () => ({ lat: map.getCenter().lat(), lng: map.getCenter().lng(), zoom: map.getZoom() }),
+                // Fractional zoom only exists on vector maps (moveCamera); raster maps take whole levels.
+                setView: ({ lat, lng, zoom }) => {
+                  if (typeof map.moveCamera === 'function') map.moveCamera({ center: { lat, lng }, zoom });
+                  else { map.setCenter({ lat, lng }); map.setZoom(Math.round(zoom)); }
+                },
+              });
+
+              // Listen for user manual drag/zoom to disable automatic camera follow
+              map.addListener('dragstart', () => {
+                if (isNavigatingMode) navigationController.handleUserMapInteraction();
+              });
+
+              //  GREEN LIGHT: Map canvas is live — safe to draw saved zones now
+              setIsMapReady(true);
+            }}
+          >
+            {showSelfMarker && (
+              <div
+                key="live-user"
+                lat={selfMarkerAt.lat}
+                lng={selfMarkerAt.lng}
+                onClick={() => handleFocus(selfMarkerAt, null)}
+                style={{ cursor: 'pointer' }}
+              >
+                {selfIndoor && <ConfidenceHalo confidence={selfIndoor.confidence} color="#10B981" />}
+                <LiveLocationMarker
+                  zoom={currentZoom}
+                  isNavigating={isNavigating || isNavigatingMode}
+                  heading={liveHeading}
+                  accuracy={liveAccuracy}
+                />
+              </div>
+            )}
+            {/* Buildings render as a single red dot marker each, not a traced outline —
               even for the subset with a verified OSM footprint, the polygon shape only
               ever matches the roof as seen from directly overhead. Real-world imagery
               here is captured off-nadir (at an angle), which displaces the visible roof
               from the ground footprint OSM actually traces, so the outline reads as
               "wrong" even when the underlying data is correct. A dot has no such
               failure mode. (TacticalLeafletMap.jsx renders the same way.) */}
-          {activeTab === 'buildings' && SRM_MASTER_DATABASE.map(b => (
-            <div
-              key={`building-${b.id}`}
-              lat={b.lat}
-              lng={b.lng}
-              onClick={() => handleFocus({ lat: b.lat, lng: b.lng }, b)}
-              style={{ cursor: 'pointer' }}
-            >
-              <BuildingMarker highlighted={(activeTab === 'buildings' && selectedItem?.id === b.id) || routeEnd?.id === b.id} />
-            </div>
-          ))}
-          {activeWaypoint && (
-            <WaypointMarker
-              lat={activeWaypoint.lat}
-              lng={activeWaypoint.lng}
-              name={activeWaypoint.name}
-              onClick={() => handleFocus(activeWaypoint, null)}
-              canClear={canClearWaypoint}
-              onClear={() => socket.emit('clear-waypoint', squadCode)}
-              onTrack={() => setArTarget({ lat: activeWaypoint.lat, lng: activeWaypoint.lng, name: activeWaypoint.name })}
-            />
-          )}
-          {/* Same set the squad roster panel shows, minus the members who have no fix to
+            {activeTab === 'buildings' && SRM_MASTER_DATABASE.map(b => (
+              <div
+                key={`building-${b.id}`}
+                lat={b.lat}
+                lng={b.lng}
+                onClick={() => handleFocus({ lat: b.lat, lng: b.lng }, b)}
+                style={{ cursor: 'pointer' }}
+              >
+                <BuildingMarker highlighted={(activeTab === 'buildings' && selectedItem?.id === b.id) || routeEnd?.id === b.id} />
+              </div>
+            ))}
+            {activeWaypoint && (
+              <WaypointMarker
+                lat={activeWaypoint.lat}
+                lng={activeWaypoint.lng}
+                name={activeWaypoint.name}
+                onClick={() => handleFocus(activeWaypoint, null)}
+                canClear={canClearWaypoint}
+                onClear={() => socket.emit('clear-waypoint', squadCode)}
+                onTrack={() => setArTarget({ lat: activeWaypoint.lat, lng: activeWaypoint.lng, name: activeWaypoint.name })}
+              />
+            )}
+            {/* Same set the squad roster panel shows, minus the members who have no fix to
               plot yet — those stay listed there rather than disappearing from the app
               entirely. Nothing else narrows it: this and the roster panel render the same
               set, deliberately, so the two views cannot drift apart again.
@@ -2827,64 +2920,64 @@ const App = () => {
               happens to be showing the buildings list (which defaults to being the active
               tab on load, so this used to hide every squad member until you flipped to the
               SQUAD tab and back). */}
-          {users.filter(u => !blockedUserIds.includes(u.id) && u.status !== 'GHOST' && u.hasFix).map(u => (
-            <div
-              key={u.id}
-              lat={u.lat}
-              lng={u.lng}
-              onClick={(e) => {
-                e?.stopPropagation?.();
-                handleFocus({ lat: u.lat, lng: u.lng }, null);
-                setOptionsMemberId(u.id);
-              }}
-              style={{
-                cursor: 'pointer',
-                pointerEvents: 'auto',
-                zIndex: 45,
-                animation: 'locus-member-fade-in 0.6s ease',
-                // Stage 7: on another floor of the building you're viewing - dimmed, never hidden.
-                ...(SHOW_INDOOR_POSITION_TO_SQUAD && isOnOtherFloor(u, indoorView) ? { opacity: 0.35 } : {}),
-              }}
-            >
-              <MemberMarker
-                name={u.name}
-                paused={u.status === 'FROZEN'}
-                isNavigating={Boolean(activeWaypoint) || (u.speed / 3.6) > NAVIGATING_SPEED_MPS}
-                heading={u.heading}
-                distance={memberDistance(u)}
-              />
-              {SHOW_INDOOR_POSITION_TO_SQUAD && memberFloorTag(u) && <FloorTag text={memberFloorTag(u)} color="#EF4444" />}
-            </div>
-          ))}
+            {users.filter(u => !blockedUserIds.includes(u.id) && u.status !== 'GHOST' && u.hasFix).map(u => (
+              <div
+                key={u.id}
+                lat={u.lat}
+                lng={u.lng}
+                onClick={(e) => {
+                  e?.stopPropagation?.();
+                  handleFocus({ lat: u.lat, lng: u.lng }, null);
+                  setOptionsMemberId(u.id);
+                }}
+                style={{
+                  cursor: 'pointer',
+                  pointerEvents: 'auto',
+                  zIndex: 45,
+                  animation: 'locus-member-fade-in 0.6s ease',
+                  // Stage 7: on another floor of the building you're viewing - dimmed, never hidden.
+                  ...(SHOW_INDOOR_POSITION_TO_SQUAD && isOnOtherFloor(u, indoorView) ? { opacity: 0.35 } : {}),
+                }}
+              >
+                <MemberMarker
+                  name={u.name}
+                  paused={u.status === 'FROZEN'}
+                  isNavigating={Boolean(activeWaypoint) || (u.speed / 3.6) > NAVIGATING_SPEED_MPS}
+                  heading={u.heading}
+                  distance={memberDistance(u)}
+                />
+                {SHOW_INDOOR_POSITION_TO_SQUAD && memberFloorTag(u) && <FloorTag text={memberFloorTag(u)} color="#EF4444" />}
+              </div>
+            ))}
 
-          {/* Ghost markers always render — no activeTab gate so they show on any tab.
+            {/* Ghost markers always render — no activeTab gate so they show on any tab.
               Position is ghost.position (live-projected, capped, then frozen at
               lastKnownLocation once expired), not a one-shot frozen guess. */}
-          {ghostMembers.map(ghost => (
-            <div
-              key={`ghost-${ghost.id}`}
-              lat={ghost.position.lat}
-              lng={ghost.position.lng}
-              onClick={(e) => {
-                e?.stopPropagation?.();
-                handleFocus(ghost.position, ghostFocusItem(ghost));
-                setOptionsMemberId(ghost.id);
-              }}
-              style={{
-                cursor: 'pointer',
-                pointerEvents: 'auto',
-                zIndex: 44,
-                opacity: ghost.fading ? 0 : 1,
-                transition: `opacity ${GHOST_FADE_MS}ms ease`
-              }}
-            >
-              <GhostMemberMarker name={ghost.name} phase={ghost.phase} elapsedLabel={ghost.elapsedLabel} />
-            </div>
-          ))}
+            {ghostMembers.map(ghost => (
+              <div
+                key={`ghost-${ghost.id}`}
+                lat={ghost.position.lat}
+                lng={ghost.position.lng}
+                onClick={(e) => {
+                  e?.stopPropagation?.();
+                  handleFocus(ghost.position, ghostFocusItem(ghost));
+                  setOptionsMemberId(ghost.id);
+                }}
+                style={{
+                  cursor: 'pointer',
+                  pointerEvents: 'auto',
+                  zIndex: 44,
+                  opacity: ghost.fading ? 0 : 1,
+                  transition: `opacity ${GHOST_FADE_MS}ms ease`
+                }}
+              >
+                <GhostMemberMarker name={ghost.name} phase={ghost.phase} elapsedLabel={ghost.elapsedLabel} />
+              </div>
+            ))}
 
 
-          {/* ... Your existing users.filter map loop stays exactly the same below this ... */}
-        </GoogleMapReact>
+            {/* ... Your existing users.filter map loop stays exactly the same below this ... */}
+          </GoogleMapReact>
         )}
         {/* PHASE 3: Satellite toggle pill removed — function reassigned to Bottom HUD GRID button */}
       </div>
@@ -3037,53 +3130,115 @@ const App = () => {
         onClose={() => setShowAdminSettings(false)}
       />
 
-      {/* ========== MOBILE BOTTOM BAR (src/components/BottomTabBar.jsx) ========== */}
-      <BottomTabBar
-        activeId={mobileView === 'scan' ? 'scan' : sheetOpen ? 'squad' : 'grid'}
-        tabs={[
-          // Map only navigates. It used to toggle satellite on every tap as well, so coming
-          // back to the map from Group or Scan flipped the map style; satellite has its own
-          // control on the map.
-          { id: 'grid', label: TABS.map, Icon: Map, flourish: 'lift' },
-          { id: 'scan', label: TABS.scan, Icon: Scan, flourish: 'turn' },
-          { id: 'squad', label: TABS.group, Icon: Users, flourish: 'pop' },
-        ]}
-        sosTrigger={
-          accessStatus === 'granted' ? (
-            <SosTrigger
-              socket={socket}
-              getLocation={() => liveLocationRef.current}
-              roomCode={squadCode}
-              senderName={user.displayName}
-              outbox={sosOutbox}
-              held={sosHeld}
-              sharingMode={telemetryMode}
-              layout="tab"
+      {/* --- TURN-BY-TURN NAVIGATION OVERLAYS --- */}
+      {/* Recenter Button when camera follow was broken by user map interaction */}
+      {isNavigatingMode && !navigationController.isFollowingCamera && (
+        <RecenterButton onClick={navigationController.handleRecenter} />
+      )}
+
+      {/* Arrival Panel when destination is reached */}
+      <AnimatePresence>
+        {isNavigatingMode && navigationController.hasArrived && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 20 }}
+            className="fixed inset-x-4 bottom-24 md:inset-x-auto md:left-1/2 md:-translate-x-1/2 md:w-96 z-[1000] pointer-events-auto"
+          >
+            <ArrivalPanel
+              destinationName={activeNavTarget?.name}
+              onDismiss={() => {
+                setIsNavigatingMode(false);
+                clearRoute();
+              }}
             />
-          ) : null
-        }
-        onSelect={(id) => {
-          const current = mobileView === 'scan' ? 'scan' : sheetOpen ? 'squad' : 'grid';
-          if (id !== current) haptic('select');
-          if (id === 'grid') {
-            setMobileView('grid');
-          } else if (id === 'scan') {
-            setMobileView('scan');
-            // First member with an actual fix — users can include members who are on the
-            // roster but haven't reported coordinates yet, and aiming the AR compass at a
-            // null coordinate points it nowhere. No one with a fix: scan toward campus.
-            const scanNode = users.find(u => u.hasFix);
-            setArTarget(scanNode
-              ? arTargetForMember(scanNode)
-              : { lat: SRM_KTR_COORDS.lat, lng: SRM_KTR_COORDS.lng, name: 'SRM_HQ' });
-          } else {
-            setMobileView('squad'); setActiveTab('users'); setSelectedItem(null); setPanelHeight('half');
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Navigation Trip Summary Card at bottom */}
+      <AnimatePresence>
+        {isNavigatingMode && activeNavTarget && !navigationController.hasArrived && (
+          <motion.div
+            initial={{ opacity: 0, y: 30 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 30 }}
+            className="fixed inset-x-3 bottom-4 md:inset-x-auto md:left-1/2 md:-translate-x-1/2 md:w-[32rem] z-[850] md:z-[1000] pointer-events-auto"
+          >
+            <NavigationSummaryCard
+              remainingMeters={navigationController.remainingDistanceMeters}
+              remainingMinutes={navigationController.remainingTimeMinutes}
+              destinationName={activeNavTarget.name}
+              onEnd={() => {
+                setIsNavigatingMode(false);
+                clearRoute();
+              }}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Google Maps Speed Limit Badge */}
+      {isNavigatingMode && (
+        <div className="fixed bottom-28 left-4 z-[900] pointer-events-none flex flex-col items-center">
+          <div className="w-12 h-12 rounded-full bg-white dark:bg-[#202124] shadow-[0_4px_16px_rgba(0,0,0,0.25)] border-[3.5px] border-red-600 flex flex-col items-center justify-center font-bold">
+            <span className="text-[14px] font-black text-zinc-900 dark:text-white leading-none">
+              {liveSpeed && liveSpeed > 0 ? Math.round(liveSpeed * 3.6) : '5'}
+            </span>
+            <span className="text-[7.5px] font-bold text-zinc-500 uppercase tracking-tighter">km/h</span>
+          </div>
+        </div>
+      )}
+
+      {/* ========== MOBILE BOTTOM BAR (src/components/BottomTabBar.jsx) ========== */}
+      {!isNavigatingMode && (
+        <BottomTabBar
+          activeId={mobileView === 'scan' ? 'scan' : sheetOpen ? 'squad' : 'grid'}
+          tabs={[
+            // Map only navigates. It used to toggle satellite on every tap as well, so coming
+            // back to the map from Group or Scan flipped the map style; satellite has its own
+            // control on the map.
+            { id: 'grid', label: TABS.map, Icon: Map, flourish: 'lift' },
+            { id: 'scan', label: TABS.scan, Icon: Scan, flourish: 'turn' },
+            { id: 'squad', label: TABS.group, Icon: Users, flourish: 'pop' },
+          ]}
+          sosTrigger={
+            accessStatus === 'granted' ? (
+              <SosTrigger
+                socket={socket}
+                getLocation={() => liveLocationRef.current}
+                roomCode={squadCode}
+                senderName={user.displayName}
+                outbox={sosOutbox}
+                held={sosHeld}
+                sharingMode={telemetryMode}
+                layout="tab"
+              />
+            ) : null
           }
-        }}
-      />
+          onSelect={(id) => {
+            const current = mobileView === 'scan' ? 'scan' : sheetOpen ? 'squad' : 'grid';
+            if (id !== current) haptic('select');
+            if (id === 'grid') {
+              setMobileView('grid');
+            } else if (id === 'scan') {
+              setMobileView('scan');
+              // First member with an actual fix — users can include members who are on the
+              // roster but haven't reported coordinates yet, and aiming the AR compass at a
+              // null coordinate points it nowhere. No one with a fix: scan toward campus.
+              const scanNode = users.find(u => u.hasFix);
+              setArTarget(scanNode
+                ? arTargetForMember(scanNode)
+                : { lat: SRM_KTR_COORDS.lat, lng: SRM_KTR_COORDS.lng, name: 'SRM_HQ' });
+            } else {
+              setMobileView('squad'); setActiveTab('users'); setSelectedItem(null); setPanelHeight('half');
+            }
+          }}
+        />
+      )}
 
       {/* The meeting point button (two steps: tap it, then tap the map) */}
-      {!(selectedItem && activeTab === 'buildings') && (
+      {!isNavigatingMode && !(selectedItem && activeTab === 'buildings') && (
         <MeetingPointButton choosing={isTargetingMode} onToggle={() => setIsTargetingMode(!isTargetingMode)} />
       )}
 
@@ -3148,7 +3303,7 @@ const App = () => {
       )}
 
       {/* ========== DESKTOP FLOATING SOS TRIGGER (Mobile is inside BottomTabBar) ========== */}
-      {accessStatus === 'granted' && (
+      {!isNavigatingMode && accessStatus === 'granted' && (
         <div className="hidden md:block fixed bottom-6 left-[23rem] z-[10001] pointer-events-auto">
           <SosTrigger
             socket={socket}
