@@ -26,6 +26,7 @@ export const LAYER = {
   arScanSheet: 9520,
   toast: 9600,
   update: 10000,
+  coldStart: 10000,
   emergencyButton: 10001,
   emergency: 10002,
 };
