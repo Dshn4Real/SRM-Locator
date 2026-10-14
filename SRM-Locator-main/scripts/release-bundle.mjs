@@ -64,11 +64,12 @@ const flagValue = (name) => {
 };
 const minNativeArg = flagValue('--min-native');
 const notesFile = flagValue('--notes');
+const repoArg = flagValue('--repo') || process.env.LOCUS_RELEASE_REPO || 'vithyakrish1402-web/Locus';
 const dryRun = argv.includes('--dry-run');
-const version = argv.find((a) => !a.startsWith('--') && a !== minNativeArg && a !== notesFile);
+const version = argv.find((a) => !a.startsWith('--') && a !== minNativeArg && a !== notesFile && a !== flagValue('--repo'));
 
 if (!version) {
-  die('usage: npm run release:bundle -- <version> [--min-native <version>] [--notes <file>] [--dry-run]');
+  die('usage: npm run release:bundle -- <version> [--min-native <version>] [--notes <file>] [--repo <owner/repo>] [--dry-run]');
 }
 if (!/^\d+\.\d+\.\d+$/.test(version)) die(`"${version}" is not a three-part semver (e.g. 1.0.1)`);
 
@@ -99,8 +100,11 @@ if (capture('git', ['tag', '--list', `js-${version}`]).stdout) die(`tag js-${ver
 // Every release tag on GitHub, in both series. Releases are made with `gh release create`,
 // which tags on GitHub only, so the local clone's tags can't be trusted to be complete.
 const publishedTags = () => {
-  const listed = capture('gh', ['release', 'list', '--limit', '500', '--json', 'tagName', '--jq', '.[].tagName']);
-  if (listed.status !== 0) die('could not list the published releases (gh release list)');
+  const args = ['release', 'list', '--limit', '500'];
+  if (repoArg) args.push('--repo', repoArg);
+  args.push('--json', 'tagName', '--jq', '.[].tagName');
+  const listed = capture('gh', args);
+  if (listed.status !== 0) die(`could not list the published releases (gh release list --repo ${repoArg})`);
   return listed.stdout.split(/\r?\n/).filter(Boolean);
 };
 // Above the APK this build.gradle describes as well as every release: a phone running
@@ -109,6 +113,7 @@ const versionConflict = releaseVersionConflict(version, publishedTags(), [native
 if (versionConflict) die(versionConflict);
 
 console.log(`\n  LOCUS JS bundle js-${version}`);
+console.log(`  Target repository: ${repoArg}`);
 console.log(`  Requires native shell >= ${minNative} (current native versionName: ${nativeName})`);
 if (dryRun) console.log('  DRY RUN: builds and hashes, but publishes nothing.');
 
@@ -163,7 +168,7 @@ if (dryRun) {
 
 // ---------------------------------------------------------------- publish
 
-run('gh', [
+const releaseArgs = [
   'release',
   'create',
   `js-${version}`,
@@ -172,6 +177,9 @@ run('gh', [
   `LOCUS JS bundle ${version}`,
   '--notes-file',
   bodyFile,
-]);
+];
+if (repoArg) releaseArgs.push('--repo', repoArg);
 
-console.log(`\n  Published js-${version}. Devices on native >= ${minNative} pick it up on their next cold start.\n`);
+run('gh', releaseArgs);
+
+console.log(`\n  Published js-${version} to ${repoArg}. Devices on native >= ${minNative} pick it up on their next cold start.\n`);
