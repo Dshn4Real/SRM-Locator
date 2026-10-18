@@ -1,10 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Check, Copy, ShieldCheck, Sun, Moon } from 'lucide-react';
-import { Chip, IconButton } from '../ui';
+import { Check, Copy, ShieldCheck } from 'lucide-react';
+import { Chip, IconButton, AnimatedThemeToggler } from '../ui';
 import { copyText } from '../../utils/clipboard';
 import { GROUP_HEADER } from '../../copy/group';
-import { setThemePreference } from '../../theme/theme';
-import { useResolvedTheme } from '../../theme/useResolvedTheme';
 
 // The group panel's header (redesign Group panel batch): "Your group", your role, the group
 // code, Copy and light/dark mode switch.
@@ -15,7 +13,6 @@ import { useResolvedTheme } from '../../theme/useResolvedTheme';
  */
 export default function GroupHeader({ isLead, code, children }) {
   const [copied, setCopied] = useState(false);
-  const theme = useResolvedTheme();
   const timer = useRef(null);
   useEffect(() => () => clearTimeout(timer.current), []);
 
@@ -31,13 +28,7 @@ export default function GroupHeader({ isLead, code, children }) {
       <div className="flex items-center gap-3">
         <h2 className="flex-1 min-w-0 text-title truncate">{GROUP_HEADER.title}</h2>
         <span className="flex items-center gap-1.5" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
-          <IconButton
-            variant="tonal"
-            label={theme === 'dark' ? 'Light mode' : 'Dark mode'}
-            icon={theme === 'dark' ? Sun : Moon}
-            onClick={() => setThemePreference(theme === 'dark' ? 'light' : 'dark')}
-            title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-          />
+          <AnimatedThemeToggler className="w-10 h-10 rounded-xl bg-surface-raised border border-border-control/25 hover:border-accent/40 shadow-xs active:scale-95 transition-all text-text" />
           <IconButton
             variant="tonal"
             label={copied ? GROUP_HEADER.copied : GROUP_HEADER.copy}

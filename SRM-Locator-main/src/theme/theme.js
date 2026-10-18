@@ -62,16 +62,33 @@ export function resolveTheme(preference, prefersDark) {
 /** Puts `theme` on <html>, where the tokens read it. */
 export function applyTheme(theme, root = document.documentElement) {
   root.dataset.theme = theme;
+  root.classList.toggle('dark', theme === 'dark');
 }
 
 const listeners = new Set();
 let current = null; // { preference, theme }
+let transitionTimer = null;
+
+function enableSmoothTransition() {
+  if (typeof document === 'undefined') return;
+  const root = document.documentElement;
+  if (!root || root.classList.contains('view-transition-active')) return;
+
+  root.classList.add('theme-transitioning');
+  clearTimeout(transitionTimer);
+  transitionTimer = setTimeout(() => {
+    root.classList.remove('theme-transitioning');
+  }, 450);
+}
 
 function update() {
   const preference = getThemePreference();
   const theme = resolveTheme(preference, systemPrefersDark());
-  applyTheme(theme);
   const changed = !current || current.preference !== preference || current.theme !== theme;
+  if (changed && current) {
+    enableSmoothTransition();
+  }
+  applyTheme(theme);
   current = { preference, theme };
   if (changed) listeners.forEach((fn) => fn(current));
 }

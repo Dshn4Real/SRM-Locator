@@ -12,6 +12,41 @@
 /* Light and dark design tokens (redesign). Screens move onto them one piece at a time. */
 @import "./theme/tokens.css";
 
+/* Circular View Transition for AnimatedThemeToggler */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+::view-transition-old(root) {
+  z-index: 1;
+}
+::view-transition-new(root) {
+  z-index: 9999;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(root),
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none !important;
+  }
+}
+
+/* Smooth theme transition across the app when toggling themes */
+html.theme-transitioning,
+html.theme-transitioning *,
+html.theme-transitioning *::before,
+html.theme-transitioning *::after {
+  transition: background-color 400ms cubic-bezier(0.4, 0, 0.2, 1),
+              border-color 400ms cubic-bezier(0.4, 0, 0.2, 1),
+              color 300ms cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 400ms cubic-bezier(0.4, 0, 0.2, 1),
+              fill 300ms cubic-bezier(0.4, 0, 0.2, 1),
+              stroke 300ms cubic-bezier(0.4, 0, 0.2, 1) !important;
+  transition-delay: 0s !important;
+}
+
 /* ---------------------------------------------------------------- touch feel */
 
 /* The browser's grey tap flash fights the app's own feedback below. */
@@ -291,6 +326,7 @@ input, textarea, select, [contenteditable="true"] { scroll-margin-bottom: var(--
    separate pane, so none of this touches the squad/building markers drawn on top. */
 .locus-map-tiles {
   filter: saturate(0.55) contrast(0.95) brightness(1.03);
+  transition: filter 500ms ease;
 }
 :root[data-theme="dark"] .locus-map-tiles {
   filter: invert(1) hue-rotate(180deg) brightness(0.62) contrast(1.15) saturate(0.18);
@@ -298,6 +334,9 @@ input, textarea, select, [contenteditable="true"] { scroll-margin-bottom: var(--
 
 /* The LOCUS logo (components/LocusMark.jsx): navy in the light theme, white in the dark, with
    the pin's hole the other way round - the two brand files in branding/. Gold dot is fixed. */
+.locus-mark-ring, .locus-mark-pin, .locus-mark-hole {
+  transition: stroke 400ms ease, fill 400ms ease;
+}
 .locus-mark-ring { stroke: #12294D; }
 .locus-mark-pin { fill: #12294D; }
 .locus-mark-hole { fill: #FFFFFF; }
