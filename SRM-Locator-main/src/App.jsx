@@ -1762,6 +1762,17 @@ const App = () => {
     setSelectedItem(building);
   };
 
+  const handleMoreInfo = (building) => {
+    setActiveTab('buildings');
+    setBuildingCategoryFilter('ALL');
+    setSearchQuery(building?.name || '');
+    if (isMobile) {
+      setMobileView('matrix');
+      setPanelHeight('half');
+    }
+    setSelectedItem(null);
+  };
+
   // The rally notice's tap. Looks the rally point up now, not from the notice: it may have
   // been cleared or replaced since (there is one rally point per squad, and no id to match).
   focusRallyPointRef.current = ({ lat, lng }) => {
@@ -3039,6 +3050,7 @@ const App = () => {
               expanded={showBuildingInfo}
               onToggleExpanded={() => setShowBuildingInfo((open) => !open)}
               onClose={() => setSelectedItem(null)}
+              onMoreInfo={() => handleMoreInfo(selectedItem)}
               onNavigate={() => handleWaypointSelect(selectedItem)}
               onArScan={() => setArTarget({ lat: selectedItem.lat, lng: selectedItem.lng, name: selectedItem.name })}
               // Who may set one follows the server: any member of the group.
